@@ -1,0 +1,11 @@
+[Unit]
+Description=Run paid domain provisioning every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=techinn-my-domain-provision.service
+
+[Install]
+WantedBy=timers.target

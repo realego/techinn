@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for paid hosting orders ready for CyberPanel provisioning
+
+[Timer]
+OnBootSec=90sec
+OnUnitActiveSec=2min
+Unit=techinn-my-cyberpanel-hosting.service
+
+[Install]
+WantedBy=timers.target

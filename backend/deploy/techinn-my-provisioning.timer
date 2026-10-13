@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for my.techinn.co.zw DNS and mailbox provisioning actions
+
+[Timer]
+OnBootSec=75sec
+OnUnitActiveSec=1min
+Unit=techinn-my-provisioning.service
+
+[Install]
+WantedBy=timers.target

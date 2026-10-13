@@ -1,0 +1,11 @@
+[Unit]
+Description=Process my.techinn.co.zw DNS and CyberPanel mailbox actions
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/home/my.techinn.co.zw/launch-ui/backend
+EnvironmentFile=/home/my.techinn.co.zw/launch-ui/backend/.env
+ExecStart=/home/my.techinn.co.zw/launch-ui/backend/.venv/bin/python manage.py process_provisioning

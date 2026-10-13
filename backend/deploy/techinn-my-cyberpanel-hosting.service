@@ -1,0 +1,11 @@
+[Unit]
+Description=Provision paid hosting orders through CyberPanel
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=mytec3641
+Group=mytec3641
+WorkingDirectory=/home/my.techinn.co.zw/launch-ui/backend
+EnvironmentFile=/home/my.techinn.co.zw/launch-ui/backend/.env
+ExecStart=/home/my.techinn.co.zw/launch-ui/backend/.venv/bin/python manage.py process_cyberpanel_hosting

@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh matched CyberPanel websites in the customer dashboard
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Unit=techinn-my-cyberpanel-import.service
+
+[Install]
+WantedBy=timers.target

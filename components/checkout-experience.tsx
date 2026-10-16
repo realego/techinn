@@ -24,6 +24,7 @@ const paymentMethods = [
 const pollWindowMs = 90_000;
 const checkoutKeyStorage = "techinn-checkout-key";
 const checkoutCartStorage = "techinn-checkout-cart";
+const testCheckoutTotal = 0.01;
 
 export function CheckoutExperience() {
   const [returnedPaymentUuid] = useState(() => (
@@ -36,6 +37,10 @@ export function CheckoutExperience() {
   const isSignedIn = useSignedIn();
   const signInHref = useSignInHref();
   const customer = getApiSession()?.customer;
+  const isTestPriceCheckout = customer?.test_checkout_enabled
+    && lines.length > 0
+    && total >= 1;
+  const checkoutTotal = isTestPriceCheckout ? testCheckoutTotal : total;
   const [paymentMethod, setPaymentMethod] = useState<(typeof paymentMethods)[number]["id"]>("ecocash");
   const [customNameservers, setCustomNameservers] = useState(false);
   const [postalSameAsPhysical, setPostalSameAsPhysical] = useState(true);
@@ -61,7 +66,10 @@ export function CheckoutExperience() {
   );
   const clearedPayment = useRef<string | null>(null);
   const attribution = useVisitAttribution();
-  const needsBusinessDetails = lines.some((line) => ["Web Hosting", "Email Hosting", "Website Design"].includes(line.product.category));
+  const needsBusinessDetails = lines.some((line) => (
+    line.productId !== "web-storage-addon"
+    && ["Web Hosting", "Email Hosting", "Website Design"].includes(line.product.category)
+  ));
   const includesDomainRegistration = lines.some((line) => line.product.category === "Domains");
 
   const applyPaymentUpdate = useCallback((updated: CheckoutPayment) => {
@@ -186,13 +194,14 @@ export function CheckoutExperience() {
       const result = await createCheckoutPayment({
         checkout_key: checkoutKey.current,
         payment_method: paymentMethod,
-        displayed_total: total.toFixed(2),
+        displayed_total: checkoutTotal.toFixed(2),
         phone: String(formData.get("phone") ?? ""),
         payment_phone: String(formData.get("payment_phone") ?? ""),
         items: lines.map((line) => ({
           product_id: line.productId,
           quantity: line.quantity,
           options: line.options,
+          ...(line.serviceUuid ? { service_uuid: line.serviceUuid } : {}),
           ...(line.domainName ? { domain_name: line.domainName } : {}),
         })),
         details,
@@ -435,8 +444,23 @@ export function CheckoutExperience() {
                     </div>
                   ))}
                 </div>
-                <div className="mt-3 flex items-center justify-between border-t pt-4">
-                  <span className="font-medium">Order total</span><span className="text-xl font-semibold">${total.toFixed(2)}</span>
+                <div className="mt-3 border-t pt-4">
+                  {isTestPriceCheckout && (
+                    <div className="w-full space-y-2 border-b pb-3 text-sm">
+                      <p role="status" className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-xs text-amber-800 dark:text-amber-300">
+                        Test checkout for this account: Paynow will charge $0.01. Services activate only after Paynow confirms the payment.
+                      </p>
+                      <div className="flex items-center justify-between text-muted-foreground">
+                        <span>Catalog price</span><span>${total.toFixed(2)}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-muted-foreground">
+                        <span>Test discount</span><span>−${(total - checkoutTotal).toFixed(2)}</span>
+                      </div>
+                    </div>
+                  )}
+                  <div className="mt-3 flex items-center justify-between">
+                    <span className="font-medium">Order total</span><span className="text-xl font-semibold">${checkoutTotal.toFixed(2)}</span>
+                  </div>
                 </div>
                 <p className="text-muted-foreground mt-2 text-xs">Recurring terms are listed beside each service. Taxes, if applicable, are calculated at confirmation.</p>
                 <fieldset className="mt-5 space-y-2.5">
@@ -476,7 +500,7 @@ export function CheckoutExperience() {
                   </Button>
                 )}
                 <Button type="submit" className="mt-5 w-full" size="lg" loading={submitting} disabled={submitting || paymentInProgress}>
-                  {submitting ? "Starting secure checkout" : paymentInProgress ? "Payment in progress" : `Pay $${total.toFixed(2)} with ${paymentMethods.find((method) => method.id === paymentMethod)?.label}`}
+                  {submitting ? "Starting secure checkout" : paymentInProgress ? "Payment in progress" : `Pay $${checkoutTotal.toFixed(2)} with ${paymentMethods.find((method) => method.id === paymentMethod)?.label}`}
                 </Button>
                 <p className="text-muted-foreground mt-3 text-center text-[11px]">
                   {attribution?.utm_source ? `Visit source recorded: ${attribution.utm_source}. ` : ""}

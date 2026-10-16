@@ -71,10 +71,16 @@ class CloudflareClient:
         return result
 
     def list_zones(self, token):
-        result = self._request(token, "GET", "/zones", query={"per_page": 50, "page": 1})
-        if not isinstance(result, list):
-            raise CloudflareError("Cloudflare returned an invalid zones list.")
-        return result
+        zones = []
+        page = 1
+        while True:
+            result = self._request(token, "GET", "/zones", query={"per_page": 50, "page": page})
+            if not isinstance(result, list):
+                raise CloudflareError("Cloudflare returned an invalid zones list.")
+            zones.extend(result)
+            if len(result) < 50:
+                return zones
+            page += 1
 
     def onboard_zone(self, token, domain):
         zones = self._request(

@@ -9,6 +9,7 @@ from apps.services.models import (
     DNSZone,
     DomainAsset,
     HostingAccount,
+    HostingWebsite,
     HostingResource,
     Mailbox,
     MailboxAccess,
@@ -20,6 +21,7 @@ from apps.services.models import (
 from apps.accounts.models import Customer
 from apps.services.domain_availability import normalize_domain_name
 from apps.services.permissions import accessible_services_for, require_service_permission
+from apps.services.storage import mailbox_storage_budget
 
 
 class DomainAssetSerializer(serializers.ModelSerializer):
@@ -28,9 +30,15 @@ class DomainAssetSerializer(serializers.ModelSerializer):
 
     def get_registration(self, obj):
         progress = (obj.customer_service.provisioning_data or {}).get("domain_registration", {})
-        status = "registered" if obj.status == DomainAsset.Status.ACTIVE else progress.get("status", "pending")
+        if obj.status == DomainAsset.Status.ACTIVE:
+            status = "registered"
+        elif obj.status == DomainAsset.Status.TRANSFER_PENDING:
+            status = "transfer_pending"
+        else:
+            status = progress.get("status", "pending")
         messages = {
             "pending": ("Preparing registration", "We are preparing your domain registration."),
+            "transfer_pending": ("Transfer awaiting confirmation", "The transfer has not been verified yet. This domain will be marked active after the transfer is confirmed."),
             "awaiting_release": ("Queued for review", "Your registration is queued for TechInn review."),
             "cloudflare_ready": ("DNS prepared", "Nameservers are ready; registration is being prepared."),
             "zispa_draft_created": ("Ready for submission", "Your registration details are prepared for submission."),
@@ -129,10 +137,40 @@ class HostingAccountSerializer(serializers.ModelSerializer):
         )
 
 
+class HostingWebsiteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HostingWebsite
+        fields = (
+            "id",
+            "domain_name",
+            "master_domain",
+            "status",
+            "last_error",
+            "certificate_status",
+            "certificate_error",
+        )
+        read_only_fields = fields
+
+
+class HostingWebsiteCreateSerializer(serializers.Serializer):
+    subdomain = serializers.CharField(max_length=63, trim_whitespace=True)
+
+    def validate_subdomain(self, value):
+        value = value.strip().lower()
+        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", value):
+            raise serializers.ValidationError(
+                "Use one subdomain label containing letters, numbers or hyphens."
+            )
+        if value in {"www", "mail", "ftp", "webmail", "cpanel"}:
+            raise serializers.ValidationError("That subdomain label is reserved.")
+        return value
+
+
 class MailboxSerializer(serializers.ModelSerializer):
     email_address = serializers.CharField(read_only=True)
     hosting_account = serializers.PrimaryKeyRelatedField(read_only=True)
-    domain = serializers.CharField(source="domain.domain_name", read_only=True)
+    domain = serializers.CharField(source="effective_domain", read_only=True)
+    error_message = serializers.CharField(source="last_error", read_only=True)
 
     class Meta:
         model = Mailbox
@@ -145,19 +183,21 @@ class MailboxSerializer(serializers.ModelSerializer):
             "quota_mb",
             "used_mb",
             "status",
+            "error_message",
             "created_at",
         )
-        read_only_fields = ("id", "used_mb", "status", "created_at")
+        read_only_fields = ("id", "used_mb", "status", "error_message", "created_at")
 
 
 class MailboxCreateSerializer(serializers.ModelSerializer):
     hosting_account_id = serializers.IntegerField(min_value=1, write_only=True)
     domain_id = serializers.IntegerField(min_value=1, write_only=True)
+    email_domain = serializers.CharField(max_length=253, required=False, allow_blank=True, write_only=True)
     password = serializers.CharField(write_only=True, trim_whitespace=False, min_length=8, max_length=128)
 
     class Meta:
         model = Mailbox
-        fields = ("hosting_account_id", "domain_id", "local_part", "quota_mb", "password")
+        fields = ("hosting_account_id", "domain_id", "email_domain", "local_part", "quota_mb", "password")
 
     def validate(self, attrs):
         local_part = attrs["local_part"]
@@ -176,6 +216,24 @@ class MailboxCreateSerializer(serializers.ModelSerializer):
             )
         except (HostingAccount.DoesNotExist, DomainAsset.DoesNotExist) as error:
             raise serializers.ValidationError("Select an active domain and hosting account that you own.") from error
+
+        email_domain = (attrs.get("email_domain") or domain.domain_name).strip().rstrip(".").lower()
+        if email_domain != domain.domain_name.lower():
+            website = HostingWebsite.objects.filter(
+                domain_name=email_domain,
+                master_domain=domain.domain_name,
+                status=HostingWebsite.Status.ACTIVE,
+                hosting_account__status=HostingAccount.Status.ACTIVE,
+                hosting_account__customer_service__status="active",
+                hosting_account__customer_service__customer=account.customer_service.customer,
+            ).first()
+            if website is None:
+                raise serializers.ValidationError({
+                    "email_domain": "Select the root domain or an active subdomain website under it."
+                })
+            attrs["email_domain"] = email_domain
+        else:
+            attrs["email_domain"] = ""
 
         if account.customer_service.status != "active":
             raise serializers.ValidationError({"hosting_account_id": "Hosting service is not active."})
@@ -213,25 +271,17 @@ class MailboxCreateSerializer(serializers.ModelSerializer):
                 "quota_mb": f"This email plan supports up to {mailbox_cap} MB per mailbox."
             })
 
-        disk_limit = account.resources.filter(resource_type=HostingResource.ResourceType.DISK).first()
-        if disk_limit:
-            requested_mb = attrs["quota_mb"]
-            allocated_mb = sum(
-                account.mailboxes.exclude(status=Mailbox.Status.DELETED).values_list("quota_mb", flat=True)
-            )
-            unit = disk_limit.unit.lower()
-            conversion = {"gb": 1024, "gib": 1024, "mb": 1, "mib": 1}.get(unit)
-            if conversion is None:
+        budget = mailbox_storage_budget(account)
+        if budget:
+            if budget.get("invalid_unit"):
                 raise serializers.ValidationError(
                     {"quota_mb": "Hosting disk allocation must use MB or GB units to validate mailbox quotas."}
                 )
-            allocation_mb = max(disk_limit.limit_value, 0) * conversion
-            if allocated_mb + requested_mb > allocation_mb:
-                available_mb = max(0, int(allocation_mb) - allocated_mb)
+            if attrs["quota_mb"] > budget["available_mb"]:
                 raise serializers.ValidationError({
                     "quota_mb": (
-                        f"This mailbox needs {requested_mb:,} MB, but only {available_mb:,} MB "
-                        "of this hosting plan's disk allocation remains."
+                        f"This mailbox needs {attrs['quota_mb']:,} MB, but only {budget['available_mb']:,} MB "
+                        "of this hosting plan's unallocated storage remains after website files and existing mailbox allocations."
                     )
                 })
 
@@ -291,10 +341,20 @@ class HostingPrimaryDomainSerializer(serializers.Serializer):
 
 class ProvisioningActionSerializer(serializers.ModelSerializer):
     service = serializers.UUIDField(source="customer_service.uuid", read_only=True)
+    error_message = serializers.CharField(source="last_error", read_only=True)
 
     class Meta:
         model = ProvisioningAction
-        fields = ("id", "service", "action_type", "status", "attempts", "scheduled_at", "completed_at")
+        fields = (
+            "id",
+            "service",
+            "action_type",
+            "status",
+            "attempts",
+            "scheduled_at",
+            "completed_at",
+            "error_message",
+        )
 
 
 class ServiceAuditEventSerializer(serializers.ModelSerializer):

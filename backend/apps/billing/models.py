@@ -21,6 +21,7 @@ class Invoice(models.Model):
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT, db_index=True)
     currency = models.CharField(max_length=3, default="USD")
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    discount_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     tax_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=0)

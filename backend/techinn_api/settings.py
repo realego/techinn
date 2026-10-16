@@ -133,6 +133,7 @@ REST_FRAMEWORK = {
         "anon": "100/hour",
         "user": "1000/hour",
         "auth": "10/hour",
+        "domain_verification": "6/min",
     },
 }
 
@@ -144,6 +145,7 @@ SIMPLE_JWT = {
 
 GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000").rstrip("/")
+CHECKOUT_TEST_EMAIL = os.getenv("CHECKOUT_TEST_EMAIL", "").strip().casefold()
 EMAIL_BACKEND = os.getenv(
     "EMAIL_BACKEND",
     "django.core.mail.backends.smtp.EmailBackend",
@@ -205,3 +207,6 @@ CORS_ALLOWED_ORIGINS = [
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
+
+TECHINN_HOSTING_IPV4 = os.getenv("TECHINN_HOSTING_IPV4", "")
+TECHINN_WEBMAIL_URL = os.getenv("TECHINN_WEBMAIL_URL", "https://techinn.co.zw/webmail/")

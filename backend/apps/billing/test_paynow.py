@@ -8,6 +8,7 @@ from django.test import SimpleTestCase, override_settings
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import Customer
+from apps.catalog.models import Product
 from apps.billing.models import Payment, PaymentProvider
 from apps.billing.paynow import (
     MOBILE_INITIATE_URL,
@@ -19,7 +20,9 @@ from apps.billing.paynow import (
     check_payment_status,
     initiate_payment,
 )
+from apps.billing.views import _mark_payment_status
 from apps.orders.models import Order
+from apps.services.models import CustomerService, DomainAsset, HostingAccount, HostingResource
 
 
 @override_settings(
@@ -42,7 +45,7 @@ class PaynowCheckoutApiTests(APITestCase):
         self.payload = {
             "checkout_key": self.checkout_key,
             "payment_method": "ecocash",
-            "displayed_total": "8.50",
+            "displayed_total": "5.50",
             "phone": "+263771234567",
             "payment_phone": "+263771234567",
             "items": [
@@ -50,7 +53,6 @@ class PaynowCheckoutApiTests(APITestCase):
                     "product_id": "web-basic",
                     "quantity": 1,
                     "options": {
-                        "storage": "10gb",
                         "backup-retention": "90days",
                     },
                 }
@@ -75,12 +77,12 @@ class PaynowCheckoutApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.data["amount"], "8.50")
+        self.assertEqual(response.data["amount"], "5.50")
         self.assertEqual(response.data["status"], Payment.Status.PROCESSING)
         self.assertNotIn("instructions", response.data)
         self.assertNotIn("Approve the payment request", str(response.data))
-        self.assertEqual(Order.objects.get().total, Decimal("8.50"))
-        self.assertEqual(Order.objects.get().items.count(), 3)
+        self.assertEqual(Order.objects.get().total, Decimal("5.50"))
+        self.assertEqual(Order.objects.get().items.count(), 2)
         payment = Payment.objects.get()
         self.assertEqual(payment.provider_reference, "PAYNOW-REF")
         self.assertNotIn("poll_url", response.data)
@@ -206,13 +208,12 @@ class PaynowCheckoutApiTests(APITestCase):
         )
         payload = {
             **self.payload,
-            "displayed_total": "91.80",
+            "displayed_total": "59.40",
             "items": [{
                 "product_id": "web-basic",
                 "quantity": 1,
                 "options": {
                     "billing": "yearly",
-                    "storage": "10gb",
                     "backup-retention": "90days",
                 },
             }],
@@ -221,7 +222,203 @@ class PaynowCheckoutApiTests(APITestCase):
         response = self.client.post("/api/v1/billing/checkout/", payload, format="json")
 
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.data["amount"], "91.80")
+        self.assertEqual(response.data["amount"], "59.40")
+
+    @patch("apps.billing.views.initiate_payment")
+    def test_chatbot_checkout_uses_server_prices_for_selected_features(self, initiate):
+        initiate.return_value = PaynowInitiation(
+            status="ok",
+            poll_url="https://www.paynow.co.zw/interface/checkpayment?guid=chatbot",
+            instructions="",
+            redirect_url="",
+            provider_reference="PAYNOW-CHATBOT",
+        )
+        response = self.client.post(
+            "/api/v1/billing/checkout/",
+            {
+                **self.payload,
+                "displayed_total": "220.00",
+                "items": [{
+                    "product_id": "chatbot-basic",
+                    "quantity": 1,
+                    "options": {
+                        "flows": "enabled",
+                        "payments": "enabled",
+                        "booking": "enabled",
+                        "tickets": "enabled",
+                        "whatsapp": "enabled",
+                        "human-handoff": "enabled",
+                    },
+                }],
+                "details": {},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["amount"], "220.00")
+        items = Order.objects.get().items.select_related("addon", "product")
+        self.assertEqual(items.count(), 7)
+        self.assertEqual(items.get(product__slug="chatbot-basic").unit_price, Decimal("80.00"))
+        self.assertEqual(items.get(addon__slug="chatbot-flows").unit_price, Decimal("25.00"))
+        self.assertEqual(items.get(addon__slug="chatbot-payments").unit_price, Decimal("30.00"))
+        self.assertEqual(items.get(addon__slug="chatbot-booking").unit_price, Decimal("0.00"))
+        self.assertEqual(items.get(addon__slug="chatbot-tickets").unit_price, Decimal("40.00"))
+        self.assertEqual(items.get(addon__slug="chatbot-whatsapp").unit_price, Decimal("25.00"))
+        self.assertEqual(items.get(addon__slug="chatbot-human-handoff").unit_price, Decimal("20.00"))
+
+    @patch("apps.billing.views.initiate_payment")
+    @override_settings(CHECKOUT_TEST_EMAIL="realego01@gmail.com")
+    def test_exact_test_customer_pays_one_cent_and_activates_paid_order(self, initiate):
+        initiate.return_value = PaynowInitiation(
+            status="ok",
+            poll_url="https://www.paynow.co.zw/interface/checkpayment?guid=test-customer",
+            instructions="",
+            redirect_url="",
+            provider_reference="PAYNOW-TEST-CUSTOMER",
+        )
+        test_customer = Customer.objects.create_user(
+            email="realego01@gmail.com",
+            password="a-secure-test-password",
+            first_name="Test",
+            status=Customer.Status.ACTIVE,
+        )
+        self.client.force_authenticate(test_customer)
+        response = self.client.post(
+            "/api/v1/billing/checkout/",
+            {
+                **self.payload,
+                "displayed_total": "0.01",
+                "items": [{
+                    "product_id": "chatbot-basic",
+                    "quantity": 1,
+                    "options": {
+                        "flows": "enabled",
+                        "payments": "enabled",
+                        "booking": "enabled",
+                        "tickets": "enabled",
+                        "whatsapp": "enabled",
+                        "human-handoff": "enabled",
+                    },
+                }],
+                "details": {},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        payment = Payment.objects.get(customer=test_customer)
+        order = Order.objects.get(customer=test_customer)
+        self.assertEqual(payment.amount, Decimal("0.01"))
+        self.assertTrue(payment.provider_data["test_checkout"])
+        from apps.accounts.serializers import CustomerSerializer
+        self.assertTrue(CustomerSerializer(test_customer).data["test_checkout_enabled"])
+        self.assertEqual(order.status, Order.Status.AWAITING_PAYMENT)
+        self.assertEqual(order.subtotal, Decimal("220.00"))
+        self.assertEqual(order.discount_total, Decimal("219.99"))
+        self.assertEqual(order.total, Decimal("0.01"))
+        self.assertEqual(order.metadata["test_checkout"]["charged_total"], "0.01")
+
+        _mark_payment_status(payment, "paid", "PAYNOW-TEST-CONFIRMED")
+
+        order.refresh_from_db()
+        payment.refresh_from_db()
+        invoice = payment.invoice
+        self.assertEqual(order.status, Order.Status.PAID)
+        self.assertEqual(invoice.discount_total, Decimal("219.99"))
+        invoices = self.client.get("/api/v1/billing/invoices/")
+        invoice_data = next(item for item in invoices.data["results"] if item["invoice_number"] == invoice.invoice_number)
+        self.assertTrue(invoice_data["is_test"])
+        self.assertEqual(invoice_data["discount_total"], "219.99")
+
+    @patch("apps.billing.views.initiate_payment")
+    @override_settings(CHECKOUT_TEST_EMAIL="realego01@gmail.com")
+    def test_test_price_is_not_available_to_other_customers(self, initiate):
+        response = self.client.post(
+            "/api/v1/billing/checkout/",
+            {
+                **self.payload,
+                "displayed_total": "0.01",
+                "items": [{
+                    "product_id": "chatbot-basic",
+                    "quantity": 1,
+                    "options": {},
+                }],
+                "details": {},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Order.objects.count(), 0)
+        initiate.assert_not_called()
+
+    @patch("apps.billing.views.initiate_payment")
+    def test_storage_extension_is_targeted_and_uses_monthly_and_annual_prices(self, initiate):
+        service = CustomerService.objects.create(
+            customer=self.customer,
+            product=Product.objects.get(slug="web-basic"),
+            status=CustomerService.Status.ACTIVE,
+        )
+        domain = DomainAsset.objects.create(
+            customer_service=service,
+            domain_name="storage.example.co.zw",
+            status=DomainAsset.Status.ACTIVE,
+        )
+        account = HostingAccount.objects.create(
+            customer_service=service,
+            primary_domain=domain,
+            status=HostingAccount.Status.ACTIVE,
+            username="storagecustomer",
+        )
+        HostingResource.objects.create(
+            hosting_account=account,
+            resource_type=HostingResource.ResourceType.DISK,
+            limit_value=2,
+            used_value=0,
+            unit="GB",
+        )
+        initiate.side_effect = [
+            PaynowInitiation(
+                status="ok",
+                poll_url="https://www.paynow.co.zw/interface/checkpayment?guid=monthly",
+                instructions="",
+                redirect_url="",
+                provider_reference="PAYNOW-STORAGE-MONTHLY",
+            ),
+            PaynowInitiation(
+                status="ok",
+                poll_url="https://www.paynow.co.zw/interface/checkpayment?guid=annual",
+                instructions="",
+                redirect_url="",
+                provider_reference="PAYNOW-STORAGE-ANNUAL",
+            ),
+        ]
+
+        for interval, total in (("monthly", "2.00"), ("yearly", "21.60")):
+            options = {"billing": "yearly"} if interval == "yearly" else {}
+            with self.subTest(interval=interval):
+                response = self.client.post(
+                    "/api/v1/billing/checkout/",
+                    {
+                        **self.payload,
+                        "checkout_key": str(uuid.uuid4()),
+                        "displayed_total": total,
+                        "items": [{
+                            "product_id": "web-storage-addon",
+                            "service_uuid": str(service.uuid),
+                            "quantity": 1,
+                            "options": options,
+                        }],
+                        "details": {},
+                    },
+                    format="json",
+                )
+                self.assertEqual(response.status_code, 201, response.data)
+                self.assertEqual(response.data["amount"], total)
+                line = Order.objects.latest("id").items.get(addon__slug="web-storage-5gb")
+                self.assertEqual(line.unit_price, Decimal(total))
+                self.assertEqual(line.metadata["customer_service_uuid"], str(service.uuid))
 
     @patch("apps.billing.views.initiate_payment")
     def test_domain_checkout_prices_selected_extension_on_server(self, initiate):

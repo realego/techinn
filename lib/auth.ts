@@ -55,7 +55,7 @@ export async function signIn(email: string, password: string) {
     },
     { authenticated: false },
   )
-  saveApiSession({ ...tokens, customer: { uuid: "", first_name: "", last_name: "", email, phone: "", company_name: "" } })
+  saveApiSession({ ...tokens, customer: { uuid: "", first_name: "", last_name: "", email, phone: "", company_name: "", test_checkout_enabled: false } })
   try {
     const customer = await apiRequest<NonNullable<ReturnType<typeof getApiSession>>["customer"]>(
       "/auth/me/",
@@ -77,7 +77,7 @@ export async function signInWithGoogle(credential: string) {
   )
   saveApiSession({
     ...tokens,
-    customer: { uuid: "", first_name: "", last_name: "", email: "", phone: "", company_name: "" },
+    customer: { uuid: "", first_name: "", last_name: "", email: "", phone: "", company_name: "", test_checkout_enabled: false },
   })
   try {
     const customer = await apiRequest<NonNullable<ReturnType<typeof getApiSession>>["customer"]>("/auth/me/")

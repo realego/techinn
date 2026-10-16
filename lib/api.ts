@@ -10,6 +10,7 @@ export interface CustomerProfile {
   email: string
   phone: string
   company_name: string
+  test_checkout_enabled: boolean
 }
 
 export interface ApiSession {
@@ -184,7 +185,13 @@ export async function apiRequest<T>(
   }
   if (!response.ok) throw new ApiError(await responseError(response), response.status)
   if (response.status === 204) return undefined as T
-  return response.json() as Promise<T>
+  const body = await response.text()
+  if (!body.trim()) return undefined as T
+  try {
+    return JSON.parse(body) as T
+  } catch {
+    throw new ApiError("The server returned an unreadable response. Refresh to check the latest status.", response.status)
+  }
 }
 
 export function createCheckoutPayment(payload: CheckoutPayload) {

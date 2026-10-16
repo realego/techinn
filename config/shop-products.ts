@@ -1,6 +1,6 @@
 import { emailHostingPlans, webHostingPlans, websiteAddOns, websitePlans } from "@/config/hosting-plans";
 
-export type ShopCategory = "All" | "Website Design" | "Web Hosting" | "Email Hosting" | "Domains" | "App Development";
+export type ShopCategory = "All" | "Website Design" | "Web Hosting" | "Email Hosting" | "Domains" | "Chatbot Development" | "App Development";
 export type ShopSelections = Record<string, string>;
 export interface ShopOption {
   id: string;
@@ -17,7 +17,7 @@ export interface ShopProduct {
   cadence: string;
   supportsYearly?: boolean;
   features: string[];
-  visual: "website" | "hosting" | "email" | "domain" | "app";
+  visual: "website" | "hosting" | "email" | "domain" | "chatbot" | "app";
   image: string;
   options: ShopOption[];
   quantityLabel?: string;
@@ -26,7 +26,6 @@ export interface ShopProduct {
 }
 const noExtra = { id: "none", label: "Not needed", price: 0 };
 const webOptions: ShopOption[] = [
-  { id: "storage", name: "Extra SSD storage", choices: [{ ...noExtra, label: "Included storage" }, { id: "5gb", label: "+5 GB", price: 1.5 }, { id: "10gb", label: "+10 GB", price: 3 }] },
   { id: "backup-retention", name: "Extended backup retention", choices: [noExtra, { id: "30days", label: "30-day retention", price: 1 }, { id: "90days", label: "90-day retention", price: 2 }] },
 ];
 const emailOptions: ShopOption[] = [
@@ -47,6 +46,14 @@ const domainOptions: ShopOption[] = [
 const appOptions: ShopOption[] = [
   { id: "publishing", name: "Publishing support", choices: [noExtra, { id: "enabled", label: "App Store and Play Store setup", price: 45 }] },
   { id: "maintenance", name: "Ongoing maintenance", choices: [noExtra, { id: "enabled", label: "Monthly maintenance", price: 25 }] },
+];
+const chatbotOptions: ShopOption[] = [
+  { id: "flows", name: "Custom conversation flows", choices: [noExtra, { id: "enabled", label: "Add custom flows", price: 25 }] },
+  { id: "payments", name: "Payment integration", choices: [noExtra, { id: "enabled", label: "Add payment integration", price: 30 }] },
+  { id: "booking", name: "Booking", free: true, choices: [noExtra, { id: "enabled", label: "Add booking", price: 0 }] },
+  { id: "tickets", name: "Support tickets", choices: [noExtra, { id: "enabled", label: "Add ticket handling", price: 40 }] },
+  { id: "whatsapp", name: "WhatsApp channel setup", choices: [noExtra, { id: "enabled", label: "Connect WhatsApp", price: 25 }] },
+  { id: "human-handoff", name: "Human support handoff", choices: [noExtra, { id: "enabled", label: "Add human handoff", price: 20 }] },
 ];
 
 export const shopProducts: ShopProduct[] = [
@@ -107,12 +114,41 @@ export const shopProducts: ShopProduct[] = [
     image: "/shop-assets/domains.png",
   },
   {
+    id: "chatbot-basic", name: "Basic chatbot development", category: "Chatbot Development",
+    description: "A helpful business chatbot with automated replies, a general assistant, and essential admin alerts.",
+    price: 80, cadence: "one time",
+    features: [
+      "Automated replies to common customer questions",
+      "General assistant for your business",
+      "Admin notifications for customer enquiries",
+      "Answers about your products and services",
+      "Basic setup, testing, and launch support",
+    ],
+    visual: "chatbot", label: "New service", options: chatbotOptions,
+    image: "/shop-assets/chatbot-development.jpeg",
+  },
+  {
     id: "app-development", name: "App development", category: "App Development",
     description: "Turn your idea into a polished mobile app for your customers.", price: 250, cadence: "one time",
     features: ["Mobile app interface", "Responsive app screens", "Launch-ready foundation"], visual: "app", label: "New service", options: appOptions,
     image: "/shop-assets/app-development.png",
   },
 ];
+
+export const storageExtensionProduct: ShopProduct = {
+  id: "web-storage-addon",
+  name: "Extra 5 GB hosting storage",
+  category: "Web Hosting",
+  description: "Add 5 GB of shared website and email storage to an active hosting service.",
+  price: 2,
+  cadence: "/ month",
+  supportsYearly: true,
+  features: ["5 GB added to the selected hosting service", "Shared by its websites and mailbox allocations"],
+  visual: "hosting",
+  image: "/shop-assets/web-hosting.webp",
+  quantityLabel: "5 GB storage unit",
+  options: [],
+};
 
 export function billingPrice(price: number, yearly: boolean) {
   const cents = Math.round(price * 100);

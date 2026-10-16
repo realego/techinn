@@ -1,3 +1,4 @@
+from django.conf import settings
 import json
 
 from django.db import transaction
@@ -5,7 +6,7 @@ from django.db.models import Prefetch
 from django.utils import timezone
 from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
@@ -17,6 +18,7 @@ from apps.services.models import (
     DNSZone,
     DomainAsset,
     HostingAccount,
+    HostingWebsite,
     HostingResource,
     Mailbox,
     MailboxAccess,
@@ -26,6 +28,7 @@ from apps.services.models import (
     ServiceMember,
 )
 from apps.services.permissions import accessible_services_for, require_service_permission
+from apps.services.storage import mailbox_storage_budget
 from apps.services.fields import encrypt_secret
 from apps.services.providers.cloudflare import CloudflareClient, CloudflareError, cloudflare_credentials
 from apps.services.serializers import (
@@ -36,6 +39,8 @@ from apps.services.serializers import (
     DomainAssetSerializer,
     HostingAccountSerializer,
     HostingPrimaryDomainSerializer,
+    HostingWebsiteCreateSerializer,
+    HostingWebsiteSerializer,
     MailboxCreateSerializer,
     MailboxSerializer,
     MailboxAccessSerializer,
@@ -110,6 +115,7 @@ class DashboardView(CustomerServiceQueryMixin, generics.GenericAPIView):
                 "domains__dns_zone__records",
                 "hosting_account__primary_domain__dns_zone__records",
                 "hosting_account__resources",
+                "hosting_account__websites",
                 "hosting_account__mailboxes__domain",
                 Prefetch(
                     "members",
@@ -118,6 +124,14 @@ class DashboardView(CustomerServiceQueryMixin, generics.GenericAPIView):
                 ),
             )
         )
+        pending_mailbox_actions = {
+            action.payload.get("mailbox_id"): action.action_type
+            for action in ProvisioningAction.objects.filter(
+                customer_service__in=services,
+                status__in=(ProvisioningAction.Status.PENDING, ProvisioningAction.Status.PROCESSING),
+                action_type__startswith="mailbox_",
+            ).only("payload", "action_type").order_by("id")
+        }
         results = []
         for service in services:
             is_owner = service.customer_id == request.user.id
@@ -138,21 +152,13 @@ class DashboardView(CustomerServiceQueryMixin, generics.GenericAPIView):
                 })
             try:
                 account = service.hosting_account
-                mailbox_errors = {}
-                for action in ProvisioningAction.objects.filter(
-                    customer_service=service,
-                    action_type=ProvisioningAction.ActionType.MAILBOX_CREATE,
-                    status=ProvisioningAction.Status.FAILED,
-                ).order_by("-created_at"):
-                    mailbox_id = (action.payload or {}).get("mailbox_id")
-                    if mailbox_id and mailbox_id not in mailbox_errors:
-                        mailbox_errors[mailbox_id] = action.last_error
                 hosting = {
                     "id": account.id,
                     "status": account.status,
                     "server_name": "Hosting server",
                     "username": account.username,
                     "primary_domain": account.primary_domain.domain_name if account.primary_domain else None,
+                    "websites": HostingWebsiteSerializer(account.websites.all(), many=True).data,
                     "resources": [
                         {
                             "type": resource.resource_type,
@@ -166,10 +172,12 @@ class DashboardView(CustomerServiceQueryMixin, generics.GenericAPIView):
                         {
                             "id": mailbox.id,
                             "email_address": mailbox.email_address,
+                            "webmail_url": settings.TECHINN_WEBMAIL_URL,
                             "quota_mb": mailbox.quota_mb,
                             "used_mb": mailbox.used_mb,
                             "status": mailbox.status,
-                            "error_message": mailbox_errors.get(mailbox.id),
+                            "error_message": mailbox.last_error,
+                            "pending_action": pending_mailbox_actions.get(mailbox.id),
                         }
                         for mailbox in account.mailboxes.exclude(status=Mailbox.Status.DELETED)
                     ],
@@ -485,7 +493,7 @@ class HostingPrimaryDomainView(CustomerServiceQueryMixin, APIView):
                 customer_service__in=self.get_service_queryset(),
             )
         except HostingAccount.DoesNotExist as error:
-            raise ValidationError({"detail": "Hosting account was not found."}) from error
+            raise NotFound("Hosting account was not found.") from error
         service = account.customer_service
         require_service_permission(request.user, service, "can_manage_hosting")
         if service.status != CustomerService.Status.ACTIVE or account.status != HostingAccount.Status.ACTIVE:
@@ -511,8 +519,162 @@ class HostingPrimaryDomainView(CustomerServiceQueryMixin, APIView):
         return Response(HostingAccountSerializer(account).data)
 
 
+class HostingWebsiteCreateView(CustomerServiceQueryMixin, APIView):
+    @transaction.atomic
+    def post(self, request, account_id):
+        serializer = HostingWebsiteCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            account = HostingAccount.objects.select_for_update().select_related(
+                "customer_service__product__service_type",
+                "customer_service__customer",
+                "primary_domain",
+            ).get(
+                pk=account_id,
+                customer_service__customer=request.user,
+            )
+        except HostingAccount.DoesNotExist as error:
+            raise NotFound("Hosting account was not found.") from error
+
+        service = account.customer_service
+        expiry = service.expires_at or service.next_due_at
+        if (
+            service.status != CustomerService.Status.ACTIVE
+            or account.status != HostingAccount.Status.ACTIVE
+            or service.product.service_type.slug != "web-hosting"
+            or (expiry and expiry <= timezone.now())
+            or not account.primary_domain
+            or account.primary_domain.status != DomainAsset.Status.ACTIVE
+            or not account.username
+        ):
+            raise ValidationError({"detail": "Subdomains require an active hosting plan and domain."})
+        require_service_permission(request.user, service, "can_manage_hosting")
+
+        subdomain = serializer.validated_data["subdomain"]
+        domain_name = f"{subdomain}.{account.primary_domain.domain_name}".lower()
+        if len(domain_name) > 50:
+            raise ValidationError({"subdomain": "The full subdomain must be 50 characters or fewer."})
+
+        with transaction.atomic():
+            existing = HostingWebsite.objects.select_for_update().filter(
+                domain_name__iexact=domain_name
+            ).first()
+            if existing and existing.hosting_account_id != account.id:
+                raise ValidationError({"subdomain": "This subdomain is already in use."})
+            if DomainAsset.objects.filter(domain_name__iexact=domain_name).exists():
+                raise ValidationError({"subdomain": "This subdomain already exists in your domain records."})
+
+            if existing and existing.status == HostingWebsite.Status.ACTIVE:
+                return Response(HostingWebsiteSerializer(existing).data)
+            if existing and existing.status == HostingWebsite.Status.PENDING:
+                return Response(HostingWebsiteSerializer(existing).data, status=status.HTTP_202_ACCEPTED)
+
+            if existing:
+                existing.status = HostingWebsite.Status.PENDING
+                existing.document_root = ""
+                existing.last_error = ""
+                existing.save(update_fields=("status", "document_root", "last_error", "updated_at"))
+                website = existing
+            else:
+                website = HostingWebsite.objects.create(
+                    hosting_account=account,
+                    domain_name=domain_name,
+                    master_domain=account.primary_domain.domain_name,
+                    status=HostingWebsite.Status.PENDING,
+                )
+            _queue_action(
+                service,
+                request.user,
+                ProvisioningAction.ActionType.HOSTING_WEBSITE_CREATE,
+                {"hosting_website_id": website.id},
+            )
+            _audit(
+                service,
+                request.user,
+                "hosting.website.create_requested",
+                "hosting_website",
+                website.id,
+                {"domain": domain_name},
+            )
+        return Response(HostingWebsiteSerializer(website).data, status=status.HTTP_202_ACCEPTED)
+
+
+class HostingWebsiteCertificateView(CustomerServiceQueryMixin, APIView):
+    @transaction.atomic
+    def post(self, request, account_id, website_id):
+        try:
+            account = HostingAccount.objects.select_for_update().select_related(
+                "customer_service__customer",
+                "primary_domain",
+            ).get(
+                pk=account_id,
+                customer_service__customer=request.user,
+            )
+        except HostingAccount.DoesNotExist as error:
+            raise NotFound("Hosting account was not found.") from error
+
+        service = account.customer_service
+        expiry = service.expires_at or service.next_due_at
+        if (
+            service.status != CustomerService.Status.ACTIVE
+            or account.status != HostingAccount.Status.ACTIVE
+            or (expiry and expiry <= timezone.now())
+            or not account.primary_domain
+        ):
+            raise ValidationError({"detail": "Certificate installation requires an active hosting account."})
+        require_service_permission(request.user, service, "can_manage_hosting")
+
+        try:
+            website = HostingWebsite.objects.select_for_update().get(
+                pk=website_id,
+                hosting_account=account,
+                status=HostingWebsite.Status.ACTIVE,
+            )
+        except HostingWebsite.DoesNotExist as error:
+            raise NotFound("The selected active website was not found.") from error
+
+        if ProvisioningAction.objects.filter(
+            customer_service=service,
+            action_type=ProvisioningAction.ActionType.HOSTING_WEBSITE_CERTIFICATE,
+            status__in=(ProvisioningAction.Status.PENDING, ProvisioningAction.Status.PROCESSING),
+            payload__hosting_website_id=website.id,
+        ).exists():
+            website.certificate_status = HostingWebsite.CertificateStatus.PENDING
+            website.certificate_error = ""
+            website.save(update_fields=("certificate_status", "certificate_error", "updated_at"))
+            return Response(HostingWebsiteSerializer(website).data, status=status.HTTP_202_ACCEPTED)
+
+        website.certificate_status = HostingWebsite.CertificateStatus.PENDING
+        website.certificate_error = ""
+        website.save(update_fields=("certificate_status", "certificate_error", "updated_at"))
+        _queue_action(
+            service,
+            request.user,
+            ProvisioningAction.ActionType.HOSTING_WEBSITE_CERTIFICATE,
+            {"hosting_website_id": website.id},
+        )
+        _audit(
+            service,
+            request.user,
+            "hosting.website.certificate_requested",
+            "hosting_website",
+            website.id,
+            {"domain": website.domain_name},
+        )
+        return Response(HostingWebsiteSerializer(website).data, status=status.HTTP_202_ACCEPTED)
+
+
 class MailboxViewSet(CustomerServiceQueryMixin, viewsets.ModelViewSet):
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+
+    def require_idle(self, mailbox):
+        if ProvisioningAction.objects.filter(
+            customer_service=mailbox.hosting_account.customer_service,
+            payload__mailbox_id=mailbox.id,
+            status__in=(ProvisioningAction.Status.PENDING, ProvisioningAction.Status.PROCESSING),
+            action_type__startswith="mailbox_",
+        ).exists():
+            raise ValidationError({"detail": "This mailbox already has an operation in progress. Please wait for it to finish."})
 
     def get_serializer_class(self):
         if self.action == "create":
@@ -540,6 +702,7 @@ class MailboxViewSet(CustomerServiceQueryMixin, viewsets.ModelViewSet):
                 "email_address": mailbox.email_address,
                 "quota_mb": mailbox.quota_mb,
                 "domain_id": mailbox.domain_id,
+                "email_domain": mailbox.effective_domain,
                 "password_encrypted": encrypt_secret(password),
             }
             _queue_action(service, request.user, ProvisioningAction.ActionType.MAILBOX_CREATE, payload)
@@ -568,13 +731,17 @@ class MailboxViewSet(CustomerServiceQueryMixin, viewsets.ModelViewSet):
         ):
             raise ValidationError({"detail": "This email service is not in an active paid period."})
         with transaction.atomic():
+            mailbox = Mailbox.objects.select_for_update().get(pk=mailbox.pk)
+            self.require_idle(mailbox)
             mailbox.status = Mailbox.Status.PENDING
-            mailbox.save(update_fields=("status", "updated_at"))
+            mailbox.last_error = ""
+            mailbox.save(update_fields=("status", "last_error", "updated_at"))
             payload = {
                 "mailbox_id": mailbox.id,
                 "email_address": mailbox.email_address,
                 "quota_mb": mailbox.quota_mb,
                 "domain_id": mailbox.domain_id,
+                "email_domain": mailbox.effective_domain,
                 "password_encrypted": encrypt_secret(password),
             }
             _queue_action(service, request.user, ProvisioningAction.ActionType.MAILBOX_CREATE, payload)
@@ -612,47 +779,103 @@ class MailboxViewSet(CustomerServiceQueryMixin, viewsets.ModelViewSet):
         if mailbox_cap and requested_mb > mailbox_cap:
             raise ValidationError({"quota_mb": f"This email plan supports up to {mailbox_cap:,} MB per mailbox."})
 
-        disk_limit = account.resources.filter(resource_type=HostingResource.ResourceType.DISK).first()
-        if disk_limit:
-            conversion = {"gb": 1024, "gib": 1024, "mb": 1, "mib": 1}.get(disk_limit.unit.lower())
-            if conversion is None:
+        budget = mailbox_storage_budget(account, excluding_mailbox=mailbox)
+        if budget:
+            if budget.get("invalid_unit"):
                 raise ValidationError({"quota_mb": "Hosting disk allocation must use MB or GB units to validate mailbox quotas."})
-            total_mb = int(disk_limit.limit_value * conversion)
-            other_allocations_mb = sum(
-                account.mailboxes.exclude(status=Mailbox.Status.DELETED)
-                .exclude(pk=mailbox.pk)
-                .values_list("quota_mb", flat=True)
-            )
-            if other_allocations_mb + requested_mb > total_mb:
-                available_mb = max(0, total_mb - other_allocations_mb)
-                raise ValidationError({"quota_mb": f"Only {available_mb:,} MB is available for this mailbox."})
+            if requested_mb > mailbox.quota_mb and requested_mb > budget["available_mb"]:
+                raise ValidationError({"quota_mb": f"Only {budget['available_mb']:,} MB is available for this mailbox."})
 
         with transaction.atomic():
-            mailbox = serializer.save()
+            mailbox = Mailbox.objects.select_for_update().get(pk=mailbox.pk)
+            self.require_idle(mailbox)
+            if mailbox.status != Mailbox.Status.ACTIVE:
+                raise ValidationError({"detail": "Only an active mailbox allocation can be changed."})
+            if requested_mb < mailbox.used_mb:
+                raise ValidationError({"quota_mb": f"This mailbox already uses {mailbox.used_mb:,} MB. Choose at least that much storage."})
+            current_budget = mailbox_storage_budget(
+                mailbox.hosting_account, excluding_mailbox=mailbox,
+            )
+            if current_budget:
+                if current_budget.get("invalid_unit"):
+                    raise ValidationError({"quota_mb": "Hosting disk allocation must use MB or GB units to validate mailbox quotas."})
+                if requested_mb > mailbox.quota_mb and requested_mb > current_budget["available_mb"]:
+                    raise ValidationError({"quota_mb": f"Only {current_budget['available_mb']:,} MB is available for this mailbox."})
+            previous_quota_mb = mailbox.quota_mb
+            mailbox.quota_mb = requested_mb
+            mailbox.last_error = ""
+            mailbox.save(update_fields=("quota_mb", "last_error", "updated_at"))
             payload = {
                 "mailbox_id": mailbox.id,
                 "email_address": mailbox.email_address,
                 "quota_mb": mailbox.quota_mb,
+                "previous_quota_mb": previous_quota_mb,
             }
+            _queue_action(
+                service,
+                request.user,
+                ProvisioningAction.ActionType.MAILBOX_UPDATE,
+                payload,
+            )
             _audit(service, request.user, "mailbox.allocation.updated", "mailbox", mailbox.id, payload)
         return Response(MailboxSerializer(mailbox).data)
+
+    @action(detail=True, methods=["post"], url_path="clear-storage")
+    def clear_storage(self, request, pk=None):
+        mailbox = self.get_object()
+        service = mailbox.hosting_account.customer_service
+        require_service_permission(request.user, service, "can_manage_email")
+        if request.data.get("confirm") is not True:
+            raise ValidationError({"confirm": "Confirm that all messages in this mailbox should be permanently deleted."})
+        if mailbox.status != Mailbox.Status.ACTIVE:
+            raise ValidationError({"detail": "Only an active mailbox can have its stored messages cleared."})
+        if service.status != CustomerService.Status.ACTIVE or (
+            service.expires_at and service.expires_at <= timezone.now()
+        ):
+            raise ValidationError({"detail": "This email service is not in an active paid period."})
+
+        with transaction.atomic():
+            mailbox = Mailbox.objects.select_for_update().get(pk=mailbox.pk)
+            self.require_idle(mailbox)
+            if mailbox.status != Mailbox.Status.ACTIVE:
+                raise ValidationError({"detail": "Only an active mailbox can have its stored messages cleared."})
+            mailbox.status = Mailbox.Status.CLEARING
+            mailbox.last_error = ""
+            mailbox.save(update_fields=("status", "last_error", "updated_at"))
+            payload = {"mailbox_id": mailbox.id, "email_address": mailbox.email_address}
+            _queue_action(
+                service,
+                request.user,
+                ProvisioningAction.ActionType.MAILBOX_CLEAR_STORAGE,
+                payload,
+            )
+            _audit(service, request.user, "mailbox.storage.clear_requested", "mailbox", mailbox.id, payload)
+        return Response({"detail": "Mailbox storage clear queued."}, status=status.HTTP_202_ACCEPTED)
 
     def destroy(self, request, *args, **kwargs):
         mailbox = self.get_object()
         require_service_permission(request.user, mailbox.hosting_account.customer_service, "can_manage_email")
         service = mailbox.hosting_account.customer_service
-        payload = {"mailbox_id": mailbox.id, "email_address": mailbox.email_address}
         with transaction.atomic():
+            mailbox = Mailbox.objects.select_for_update().get(pk=mailbox.pk)
+            self.require_idle(mailbox)
+            if mailbox.status in (Mailbox.Status.CLEARING, Mailbox.Status.DELETING, Mailbox.Status.DELETED):
+                raise ValidationError({"detail": "This mailbox already has an operation in progress."})
             mailbox.status = Mailbox.Status.DELETING
-            mailbox.save(update_fields=("status", "updated_at"))
+            mailbox.last_error = ""
+            mailbox.save(update_fields=("status", "last_error", "updated_at"))
             _sync_mailbox_resource(mailbox.hosting_account)
+            payload = {"mailbox_id": mailbox.id, "email_address": mailbox.email_address}
             _queue_action(service, request.user, ProvisioningAction.ActionType.MAILBOX_DELETE, payload)
             _audit(service, request.user, "mailbox.delete.requested", "mailbox", mailbox.id, payload)
-        return Response(status=status.HTTP_202_ACCEPTED)
+        return Response({"detail": "Mailbox deletion queued.", "status": "deleting"}, status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=["post"], url_path="reset-password")
+    @transaction.atomic
     def reset_password(self, request, pk=None):
         mailbox = self.get_object()
+        mailbox = Mailbox.objects.select_for_update().get(pk=mailbox.pk)
+        self.require_idle(mailbox)
         service = mailbox.hosting_account.customer_service
         require_service_permission(request.user, service, "can_manage_email")
         if mailbox.status != Mailbox.Status.ACTIVE or service.status != CustomerService.Status.ACTIVE or (
@@ -833,43 +1056,25 @@ class CloudflareZoneConnectView(CustomerServiceQueryMixin, APIView):
             raise ValidationError({"cloudflare_zone_id": "Cloudflare returned an invalid domain name."})
         if DomainAsset.objects.filter(domain_name__iexact=domain_name).exists():
             raise ValidationError({"detail": "This domain is already connected to a TechInn service."})
-        nameservers = zone.get("name_servers")
-        if not isinstance(nameservers, list) or any(not isinstance(item, str) for item in nameservers):
-            nameservers = []
-
+        # Legacy entry point joins the verified onboarding workflow too.
+        from apps.services.connection_views import DomainConnectionSerializer
+        from apps.services.domain_connections import eligible_service
+        from apps.services.models import DomainConnection
+        import secrets
+        if service.customer_id != request.user.id:
+            raise ValidationError({"detail": "Only the plan owner can connect a new domain."})
+        eligible_service(service, domain_name, "both")
         with transaction.atomic():
-            domain = DomainAsset.objects.create(
-                customer_service=service,
-                domain_name=domain_name,
-                registrar="External domain",
-                status=DomainAsset.Status.ACTIVE,
-                nameservers=nameservers,
-            )
-            dns_zone = DNSZone.objects.create(
-                domain=domain,
-                provider_connection=connection,
+            service = CustomerService.objects.select_for_update().get(pk=service.pk)
+            if DomainConnection.objects.filter(customer_service=service).exists():
+                raise ValidationError({"detail": "This plan already has a connection. Continue in Connections."})
+            connection_request = DomainConnection.objects.create(
+                customer=request.user, customer_service=service, domain_name=domain_name,
+                mode="cloudflare", services="both", provider_connection=connection,
                 external_zone_id=payload["cloudflare_zone_id"],
-                status=DNSZone.Status.PENDING,
+                verification_token="techinn-" + secrets.token_urlsafe(32), next_check_at=None,
             )
-            hosting_account = HostingAccount.objects.filter(customer_service=service).first()
-            if hosting_account and not hosting_account.primary_domain_id:
-                hosting_account.primary_domain = domain
-                hosting_account.save(update_fields=("primary_domain", "updated_at"))
-            _audit(
-                service,
-                request.user,
-                "domain.cloudflare.connected",
-                "domain_asset",
-                domain.id,
-                {"domain": domain_name, "provider": ProviderConnection.Provider.CLOUDFLARE},
-            )
-        return Response(
-            {
-                **DomainAssetSerializer(domain).data,
-                "dns": DNSZoneSerializer(dns_zone).data,
-            },
-            status=status.HTTP_201_CREATED,
-        )
+        return Response(DomainConnectionSerializer(connection_request).data, status=status.HTTP_201_CREATED)
 
 
 class CloudflareZoneListView(CustomerServiceQueryMixin, APIView):

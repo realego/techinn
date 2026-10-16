@@ -27,6 +27,7 @@ class CustomerInvoiceSerializer(serializers.ModelSerializer):
             "status",
             "currency",
             "subtotal",
+            "discount_total",
             "tax_total",
             "total",
             "amount_paid",
@@ -39,7 +40,11 @@ class CustomerInvoiceSerializer(serializers.ModelSerializer):
         )
 
     def get_is_test(self, invoice):
-        return any(payment.payment_provider.slug == "internal-test" for payment in invoice.payments.all())
+        return any(
+            payment.payment_provider.slug == "internal-test"
+            or (payment.provider_data or {}).get("test_checkout", False)
+            for payment in invoice.payments.all()
+        )
 
     def get_payment_method(self, invoice):
         payments = [payment for payment in invoice.payments.all() if payment.status == "successful"]
@@ -53,6 +58,7 @@ class CustomerInvoiceSerializer(serializers.ModelSerializer):
 
 class CheckoutLineSerializer(serializers.Serializer):
     product_id = serializers.SlugField(max_length=150)
+    service_uuid = serializers.UUIDField(required=False)
     quantity = serializers.IntegerField(min_value=1, max_value=100)
     options = serializers.DictField(
         child=serializers.CharField(max_length=50),

@@ -10,9 +10,9 @@ from apps.services.providers.cyberpanel import CyberPanelClient, CyberPanelError
 
 
 PLAN_SPECS = (
-    ("web-basic", "CYBERPANEL_PACKAGE_WEB_BASIC", "2GB", 2048, 1),
-    ("web-growth", "CYBERPANEL_PACKAGE_WEB_GROWTH", "10GB", 10240, 5),
-    ("web-business", "CYBERPANEL_PACKAGE_WEB_BUSINESS", "25GB", 25600, 20),
+    ("web-basic", "CYBERPANEL_PACKAGE_WEB_BASIC", "2GB", 2048, 21),
+    ("web-growth", "CYBERPANEL_PACKAGE_WEB_GROWTH", "10GB", 10240, 21),
+    ("web-business", "CYBERPANEL_PACKAGE_WEB_BUSINESS", "25GB", 25600, 21),
 )
 
 
@@ -93,7 +93,7 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(
             "CyberPanel plans configured: " + ", ".join(
-                f"{row['name']} ({row['disk_mb'] // 1024} GB, {row['domains']} website(s))"
+                f"{row['name']} ({row['disk_mb'] // 1024} GB, 20 subdomain websites plus mail routing)"
                 for row in saved
             )
         ))

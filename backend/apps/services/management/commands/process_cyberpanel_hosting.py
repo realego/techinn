@@ -13,6 +13,7 @@ from apps.services.providers.cyberpanel import (
     generate_owner_password,
     run_local_mail_operation,
 )
+from apps.services.storage import set_shared_hosting_disk_quota
 
 
 def reactivate_email_mailboxes(service):
@@ -24,11 +25,11 @@ def reactivate_email_mailboxes(service):
         password = generate_owner_password()
         run_local_mail_operation(
             operation="change_password",
-            domain=mailbox.domain.domain_name,
+            domain=mailbox.effective_domain,
             local_part=mailbox.local_part,
             password=password,
         )
-        credentials.append((mailbox.email_address, mailbox.domain.domain_name, password))
+        credentials.append((mailbox.email_address, mailbox.effective_domain, password))
     message = ["Your paid email service has been reactivated.", ""]
     for email_address, domain_name, password in credentials:
         message.extend((f"Email: {email_address}", f"Webmail: https://{domain_name}/webmail", f"Temporary password: {password}", ""))
@@ -220,8 +221,9 @@ class Command(BaseCommand):
                     if not sent:
                         raise CyberPanelError("Hosting was created, but the access email could not be sent.")
                 account.username = username
+                account.linux_username = result.get("linux_username", "")
                 account.status = HostingAccount.Status.ACTIVE
-                account.save(update_fields=("username", "status", "updated_at"))
+                account.save(update_fields=("username", "linux_username", "status", "updated_at"))
                 HostingResource.objects.update_or_create(
                     hosting_account=account,
                     resource_type=HostingResource.ResourceType.DISK,
@@ -232,6 +234,7 @@ class Command(BaseCommand):
                         "measured_at": timezone.now(),
                     },
                 )
+                set_shared_hosting_disk_quota(account)
                 HostingResource.objects.update_or_create(
                     hosting_account=account,
                     resource_type=HostingResource.ResourceType.EMAIL_ACCOUNTS,

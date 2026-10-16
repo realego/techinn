@@ -236,6 +236,7 @@
 .dark .shop-service-row[data-service="hosting"] { --shop-accent-ink: #7dd3fc; }
 .dark .shop-service-row[data-service="email"] { --shop-accent-ink: #c4b5fd; }
 .dark .shop-service-row[data-service="domain"] { --shop-accent-ink: #6ee7b7; }
+.dark .shop-service-row[data-service="chatbot"] { --shop-accent-ink: #c4b5fd; }
 .dark .shop-service-row[data-service="app"] { --shop-accent-ink: #fda4af; }
 .shop-service-identity {
   background: var(--background);
@@ -261,6 +262,7 @@
   background-position: center top;
 }
 .shop-service-row[data-service="app"] .shop-service-art { background-position: center 45%; }
+.shop-service-row[data-service="chatbot"] .shop-service-art { background-position: center 40%; }
 @media (max-width: 639px) {
   .shop-service-art { height: 190px; }
   .shop-service-copy { padding: 174px 4px 4px; }

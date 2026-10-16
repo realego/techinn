@@ -1,11 +1,15 @@
+import base64
+import json
 from decimal import Decimal
 from unittest.mock import Mock, patch
 
 from django.db import connection
+from django.test import override_settings
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import Customer
-from apps.catalog.models import Product, ServiceType
+from apps.catalog.models import Addon, Product, ServiceType
+from apps.orders.models import Order, OrderItem
 from apps.services.models import (
     CustomerService,
     DNSRecord,
@@ -13,15 +17,32 @@ from apps.services.models import (
     DomainAsset,
     HostingAccount,
     HostingResource,
+    HostingStorageAddon,
+    HostingWebsite,
     Mailbox,
     ProviderConnection,
     ProvisioningAction,
     ServiceAuditEvent,
     ServiceMember,
 )
-from apps.services.management.commands.process_provisioning import process_dns_action
+from apps.services.serializers import DomainAssetSerializer
+from apps.services.management.commands.process_provisioning import (
+    process_dns_action,
+    process_mailbox_action,
+    process_hosting_storage_action,
+    process_hosting_certificate_action,
+    process_hosting_website_action,
+    queue_hosting_storage_actions,
+)
+from apps.services.management.commands.sync_cyberpanel_services import sync_mailboxes
 from apps.services.providers.cloudflare import CloudflareClient
-from apps.services.providers.cyberpanel import run_local_mail_operation
+from apps.services.providers.cyberpanel import (
+    CyberPanelError,
+    run_local_mail_operation,
+    run_local_mail_quota_operation,
+    set_linux_user_disk_quota,
+)
+from apps.services.storage import mailbox_storage_budget, set_shared_hosting_disk_quota
 
 
 class CustomerControlPanelApiTests(APITestCase):
@@ -114,6 +135,200 @@ class CustomerControlPanelApiTests(APITestCase):
         self.assertEqual(self.client.post(path).status_code, 400)
         self.client.force_authenticate(None)
         self.assertEqual(self.client.post(path).status_code, 401)
+
+    @patch("apps.services.panel_access.Path.read_bytes", return_value=b"test-sso-secret")
+    def test_hosting_panel_login_uses_cyberpanel_account_access_for_active_customer(self, key):
+        path = f"/api/v1/services/hosting-accounts/{self.account.pk}/panel-login/"
+        with override_settings(CYBERPANEL_API_URL="https://panel.example.com"):
+            response = self.client.post(path)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["url"], "https://panel.example.com/api/techinn/session/")
+        ticket_data = response.data["ticket"].split(".")[0]
+        ticket_payload = json.loads(
+            base64.urlsafe_b64decode(ticket_data + "=" * (-len(ticket_data) % 4))
+        )
+        self.assertEqual(ticket_payload["access_mode"], "panel")
+        self.assertEqual(ticket_payload["username"], self.account.username)
+        self.assertNotIn("child_domain", ticket_payload)
+
+        self.customer.status = self.customer.Status.PENDING
+        self.customer.save(update_fields=("status",))
+        self.assertEqual(self.client.post(path).status_code, 400)
+
+        self.customer.status = self.customer.Status.ACTIVE
+        self.customer.save(update_fields=("status",))
+        self.client.force_authenticate(self.other_customer)
+        self.assertEqual(self.client.post(path).status_code, 404)
+
+    def test_unverified_domain_transfer_is_not_reported_as_registered(self):
+        self.domain.status = DomainAsset.Status.TRANSFER_PENDING
+        self.domain.save(update_fields=("status",))
+
+        registration = DomainAssetSerializer(self.domain).data["registration"]
+
+        self.assertEqual(registration["status"], "transfer_pending")
+        self.assertEqual(registration["label"], "Transfer awaiting confirmation")
+        self.assertIn("not been verified yet", registration["message"])
+
+    @patch("apps.services.panel_access.Path.read_bytes", return_value=b"test-sso-secret")
+    def test_file_manager_ticket_targets_an_active_subdomain_website(self, key):
+        website = HostingWebsite.objects.create(
+            hosting_account=self.account,
+            domain_name="blog.example.co.zw",
+            master_domain=self.domain.domain_name,
+            document_root="/home/example.co.zw/public_html/blog",
+            status=HostingWebsite.Status.ACTIVE,
+        )
+        with override_settings(CYBERPANEL_API_URL="https://panel.example.com"):
+            response = self.client.post(
+                f"/api/v1/services/hosting-accounts/{self.account.pk}/file-manager/",
+                {"website_domain": website.domain_name},
+                format="json",
+            )
+        self.assertEqual(response.status_code, 200)
+        ticket_data = response.data["ticket"].split(".")[0]
+        ticket_payload = json.loads(
+            base64.urlsafe_b64decode(ticket_data + "=" * (-len(ticket_data) % 4))
+        )
+        self.assertEqual(ticket_payload["domain"], self.domain.domain_name)
+        self.assertEqual(ticket_payload["child_domain"], website.domain_name)
+        self.assertEqual(response["Cache-Control"], "no-store")
+
+        response = self.client.post(
+            f"/api/v1/services/hosting-accounts/{self.account.pk}/file-manager/",
+            {"website_domain": "other.example.co.zw"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_customer_can_queue_subdomain_website_once(self):
+        path = f"/api/v1/services/hosting-accounts/{self.account.pk}/websites/"
+        response = self.client.post(path, {"subdomain": "blog"}, format="json")
+
+        self.assertEqual(response.status_code, 202, response.data)
+        website = HostingWebsite.objects.get(domain_name="blog.example.co.zw")
+        self.assertEqual(website.master_domain, self.domain.domain_name)
+        self.assertEqual(website.status, HostingWebsite.Status.PENDING)
+        action = ProvisioningAction.objects.get(
+            action_type=ProvisioningAction.ActionType.HOSTING_WEBSITE_CREATE
+        )
+        self.assertEqual(action.payload, {"hosting_website_id": website.id})
+
+        duplicate = self.client.post(path, {"subdomain": "BLOG"}, format="json")
+        self.assertEqual(duplicate.status_code, 202)
+        self.assertEqual(ProvisioningAction.objects.count(), 1)
+
+    def test_subdomain_creation_rejects_invalid_labels_and_non_owners(self):
+        path = f"/api/v1/services/hosting-accounts/{self.account.pk}/websites/"
+        response = self.client.post(path, {"subdomain": "blog.example"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        response = self.client.post(path, {"subdomain": "mail"}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+        self.client.force_authenticate(self.other_customer)
+        self.assertEqual(
+            self.client.post(path, {"subdomain": "blog"}, format="json").status_code,
+            404,
+        )
+
+    def test_mailbox_delete_uses_scoped_account_and_maildir_deletion(self):
+        with patch(
+            "apps.services.providers.cyberpanel.subprocess.run",
+            return_value=Mock(returncode=0, stdout='{"ok": true, "message": "None"}\n', stderr=""),
+        ) as run:
+            result = run_local_mail_operation(
+                operation="delete",
+                domain="delete.example.co.zw",
+                local_part="user",
+            )
+
+        self.assertIsNone(result)
+        script = run.call_args.args[0][2]
+        self.assertIn("EUsers.objects.filter(email=d['email']).delete()", script)
+        self.assertIn("django.setup()", script)
+        self.assertIn("resolved_domain_root.parent != root", script)
+        self.assertIn("resolved_account_path.parent != resolved_domain_root", script)
+        self.assertIn("shutil.rmtree(resolved_account_path)", script)
+        self.assertEqual(run.call_args.kwargs["cwd"], "/usr/local/CyberCP")
+        payload = json.loads(run.call_args.kwargs["input"])
+        self.assertEqual(payload["domain"], "delete.example.co.zw")
+        self.assertEqual(payload["local_part"], "user")
+
+    def test_subdomain_worker_activates_website_after_panel_confirmation(self):
+        self.client.post(
+            f"/api/v1/services/hosting-accounts/{self.account.pk}/websites/",
+            {"subdomain": "blog"},
+            format="json",
+        )
+        website = HostingWebsite.objects.get(domain_name="blog.example.co.zw")
+        action = ProvisioningAction.objects.get(
+            action_type=ProvisioningAction.ActionType.HOSTING_WEBSITE_CREATE
+        )
+        client = Mock()
+        client.create_child_website.return_value = {
+            "success": True,
+            "domain": website.domain_name,
+            "document_root": "/home/example.co.zw/public_html/blog",
+        }
+
+        process_hosting_website_action(action, client)
+        website.refresh_from_db()
+        self.assertEqual(website.status, HostingWebsite.Status.ACTIVE)
+        self.assertEqual(website.document_root, client.create_child_website.return_value["document_root"])
+        client.create_child_website.assert_called_once_with(
+            master_domain=self.domain.domain_name,
+            child_domain=website.domain_name,
+            username=self.account.username,
+            plan_expires=None,
+        )
+
+    def test_customer_can_queue_and_complete_subdomain_certificate(self):
+        website = HostingWebsite.objects.create(
+            hosting_account=self.account,
+            domain_name="blog.example.co.zw",
+            master_domain=self.domain.domain_name,
+            document_root="/home/example.co.zw/public_html/blog",
+            status=HostingWebsite.Status.ACTIVE,
+        )
+        path = (
+            f"/api/v1/services/hosting-accounts/{self.account.pk}/"
+            f"websites/{website.pk}/certificate/"
+        )
+
+        response = self.client.post(path, {}, format="json")
+        self.assertEqual(response.status_code, 202, response.data)
+        self.assertEqual(response.data["certificate_status"], HostingWebsite.CertificateStatus.PENDING)
+        action = ProvisioningAction.objects.get(
+            action_type=ProvisioningAction.ActionType.HOSTING_WEBSITE_CERTIFICATE
+        )
+
+        provider = Mock()
+        process_hosting_certificate_action(action, provider)
+        website.refresh_from_db()
+        self.assertEqual(website.certificate_status, HostingWebsite.CertificateStatus.ACTIVE)
+        self.assertEqual(website.certificate_error, "")
+        provider.install_child_certificate.assert_called_once_with(
+            master_domain=self.domain.domain_name,
+            child_domain=website.domain_name,
+            username=self.account.username,
+            plan_expires=None,
+        )
+
+    def test_certificate_request_cannot_target_another_customer_website(self):
+        website = HostingWebsite.objects.create(
+            hosting_account=self.account,
+            domain_name="blog.example.co.zw",
+            master_domain=self.domain.domain_name,
+            document_root="/home/example.co.zw/public_html/blog",
+            status=HostingWebsite.Status.ACTIVE,
+        )
+        self.client.force_authenticate(self.other_customer)
+        path = (
+            f"/api/v1/services/hosting-accounts/{self.account.pk}/"
+            f"websites/{website.pk}/certificate/"
+        )
+        self.assertEqual(self.client.post(path, {}, format="json").status_code, 404)
 
     def test_dashboard_returns_customer_domains_hosting_and_allocations_only(self):
         response = self.client.get("/api/v1/services/dashboard/")
@@ -284,6 +499,31 @@ class CustomerControlPanelApiTests(APITestCase):
         )
         self.assertEqual(over_limit.status_code, 400)
 
+    def test_mailbox_creation_targets_active_subdomain_but_retains_root_service(self):
+        HostingWebsite.objects.create(
+            hosting_account=self.account,
+            domain_name="shop.example.co.zw",
+            master_domain=self.domain.domain_name,
+            status=HostingWebsite.Status.ACTIVE,
+        )
+        response = self.client.post(
+            "/api/v1/services/mailboxes/",
+            {
+                "hosting_account_id": self.account.id,
+                "domain_id": self.domain.id,
+                "email_domain": "shop.example.co.zw",
+                "local_part": "orders",
+                "quota_mb": 1024,
+                "password": "Strong-password-123!",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 202, response.data)
+        mailbox = Mailbox.objects.get()
+        self.assertEqual(mailbox.domain_id, self.domain.id)
+        self.assertEqual(mailbox.effective_domain, "shop.example.co.zw")
+        self.assertEqual(mailbox.email_address, "orders@shop.example.co.zw")
+
     def test_mailbox_storage_allocation_can_be_increased_or_reduced_above_usage(self):
         mailbox = Mailbox.objects.create(
             hosting_account=self.account,
@@ -301,6 +541,14 @@ class CustomerControlPanelApiTests(APITestCase):
         )
         self.assertEqual(increased.status_code, 200, increased.data)
         self.assertEqual(increased.data["quota_mb"], 1024)
+        blocked = self.client.delete(f"/api/v1/services/mailboxes/{mailbox.id}/")
+        self.assertEqual(blocked.status_code, 400)
+        blocked = self.client.patch(f"/api/v1/services/mailboxes/{mailbox.id}/", {"quota_mb": 256}, format="json")
+        self.assertEqual(blocked.status_code, 400)
+        dashboard = self.client.get("/api/v1/services/dashboard/")
+        row = next(row for service in dashboard.data["services"] if service["hosting"] for row in service["hosting"]["mailboxes"] if row["id"] == mailbox.id)
+        self.assertEqual(row["pending_action"], "mailbox_update")
+        ProvisioningAction.objects.filter(payload__mailbox_id=mailbox.id).update(status=ProvisioningAction.Status.COMPLETED)
 
         reduced = self.client.patch(
             f"/api/v1/services/mailboxes/{mailbox.id}/",
@@ -309,7 +557,14 @@ class CustomerControlPanelApiTests(APITestCase):
         )
         self.assertEqual(reduced.status_code, 200, reduced.data)
         self.assertEqual(reduced.data["quota_mb"], 256)
-        self.assertFalse(ProvisioningAction.objects.exists())
+        quota_actions = ProvisioningAction.objects.filter(
+            action_type=ProvisioningAction.ActionType.MAILBOX_UPDATE,
+        ).order_by("id")
+        self.assertEqual(quota_actions.count(), 2)
+        self.assertEqual(
+            [action.payload["quota_mb"] for action in quota_actions],
+            [1024, 256],
+        )
 
         below_current_usage = self.client.patch(
             f"/api/v1/services/mailboxes/{mailbox.id}/",
@@ -317,8 +572,396 @@ class CustomerControlPanelApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(below_current_usage.status_code, 400)
+        self.assertEqual(quota_actions.count(), 2)
         mailbox.refresh_from_db()
         self.assertEqual(mailbox.quota_mb, 256)
+
+    def test_mailbox_quota_can_be_reduced_when_hosting_disk_is_over_limit(self):
+        mailbox = Mailbox.objects.create(
+            hosting_account=self.account,
+            domain=self.domain,
+            local_part="overlimit",
+            quota_mb=1024,
+            used_mb=128,
+            status=Mailbox.Status.ACTIVE,
+        )
+        disk = self.account.resources.get(resource_type=HostingResource.ResourceType.DISK)
+        disk.used_value = Decimal("12")
+        disk.save(update_fields=("used_value",))
+
+        reduced = self.client.patch(
+            f"/api/v1/services/mailboxes/{mailbox.id}/",
+            {"quota_mb": 512},
+            format="json",
+        )
+        self.assertEqual(reduced.status_code, 200, reduced.data)
+        self.assertEqual(reduced.data["quota_mb"], 512)
+
+        increased = self.client.patch(
+            f"/api/v1/services/mailboxes/{mailbox.id}/",
+            {"quota_mb": 1536},
+            format="json",
+        )
+        self.assertEqual(increased.status_code, 400)
+
+    def test_clear_mailbox_storage_requires_confirmation_and_queues_for_owner(self):
+        mailbox = Mailbox.objects.create(
+            hosting_account=self.account,
+            domain=self.domain,
+            local_part="clearable",
+            quota_mb=512,
+            used_mb=75,
+            status=Mailbox.Status.ACTIVE,
+        )
+        path = f"/api/v1/services/mailboxes/{mailbox.id}/clear-storage/"
+
+        unconfirmed = self.client.post(path, {}, format="json")
+        self.assertEqual(unconfirmed.status_code, 400)
+        mailbox.refresh_from_db()
+        self.assertEqual(mailbox.status, Mailbox.Status.ACTIVE)
+        self.assertFalse(ProvisioningAction.objects.filter(
+            action_type=ProvisioningAction.ActionType.MAILBOX_CLEAR_STORAGE,
+        ).exists())
+
+        confirmed = self.client.post(path, {"confirm": True}, format="json")
+        self.assertEqual(confirmed.status_code, 202, confirmed.data)
+        mailbox.refresh_from_db()
+        self.assertEqual(mailbox.status, Mailbox.Status.CLEARING)
+        action = ProvisioningAction.objects.get(
+            action_type=ProvisioningAction.ActionType.MAILBOX_CLEAR_STORAGE,
+        )
+        self.assertEqual(action.payload["mailbox_id"], mailbox.id)
+        self.assertEqual(self.client.post(path, {"confirm": True}, format="json").status_code, 400)
+        self.assertEqual(
+            self.client.delete(f"/api/v1/services/mailboxes/{mailbox.id}/").status_code,
+            400,
+        )
+
+        self.client.force_authenticate(self.other_customer)
+        forbidden = self.client.post(path, {"confirm": True}, format="json")
+        self.assertEqual(forbidden.status_code, 404)
+
+    def test_mailbox_clear_worker_updates_usage_only_after_verified_success(self):
+        mailbox = Mailbox.objects.create(
+            hosting_account=self.account,
+            domain=self.domain,
+            local_part="worker-clear",
+            quota_mb=512,
+            used_mb=75,
+            status=Mailbox.Status.CLEARING,
+        )
+        action = ProvisioningAction.objects.create(
+            customer_service=self.service,
+            action_type=ProvisioningAction.ActionType.MAILBOX_CLEAR_STORAGE,
+            payload={"mailbox_id": mailbox.id},
+        )
+        with patch(
+            "apps.services.management.commands.process_provisioning.run_local_mail_operation",
+            return_value={"ok": True, "used_mb": 0},
+        ) as clear_mailbox:
+            process_mailbox_action(action)
+        clear_mailbox.assert_called_once_with(
+            operation="clear_storage",
+            domain=mailbox.effective_domain,
+            local_part=mailbox.local_part,
+        )
+        mailbox.refresh_from_db()
+        self.assertEqual(mailbox.used_mb, 0)
+        self.assertEqual(mailbox.status, Mailbox.Status.ACTIVE)
+
+    def test_mailbox_clear_worker_restores_status_when_cleanup_fails(self):
+        mailbox = Mailbox.objects.create(
+            hosting_account=self.account,
+            domain=self.domain,
+            local_part="failed-clear",
+            quota_mb=512,
+            used_mb=75,
+            status=Mailbox.Status.CLEARING,
+        )
+        action = ProvisioningAction.objects.create(
+            customer_service=self.service,
+            action_type=ProvisioningAction.ActionType.MAILBOX_CLEAR_STORAGE,
+            payload={"mailbox_id": mailbox.id},
+        )
+        with patch(
+            "apps.services.management.commands.process_provisioning.run_local_mail_operation",
+            side_effect=CyberPanelError("Cleanup could not be verified."),
+        ), self.assertRaises(CyberPanelError):
+            process_mailbox_action(action)
+        mailbox.refresh_from_db()
+        self.assertEqual(mailbox.used_mb, 75)
+        self.assertEqual(mailbox.status, Mailbox.Status.ACTIVE)
+        self.assertEqual(mailbox.last_error, "Cleanup could not be verified.")
+
+    def test_mailbox_delete_worker_restores_active_status_when_provider_delete_fails(self):
+        mailbox = Mailbox.objects.create(
+            hosting_account=self.account,
+            domain=self.domain,
+            local_part="failed-delete",
+            quota_mb=512,
+            used_mb=0,
+            status=Mailbox.Status.DELETING,
+        )
+        action = ProvisioningAction.objects.create(
+            customer_service=self.service,
+            action_type=ProvisioningAction.ActionType.MAILBOX_DELETE,
+            payload={"mailbox_id": mailbox.id},
+        )
+        with patch(
+            "apps.services.management.commands.process_provisioning.run_local_mail_operation",
+            side_effect=CyberPanelError("Mailbox could not be deleted."),
+        ), self.assertRaises(CyberPanelError):
+            process_mailbox_action(action)
+
+        mailbox.refresh_from_db()
+        self.assertEqual(mailbox.status, Mailbox.Status.ACTIVE)
+        self.assertEqual(mailbox.last_error, "Mailbox could not be deleted.")
+
+    def test_mailbox_quota_worker_restores_allocation_after_provider_failure(self):
+        mailbox = Mailbox.objects.create(
+            hosting_account=self.account,
+            domain=self.domain,
+            local_part="failed-quota",
+            quota_mb=768,
+            used_mb=0,
+            status=Mailbox.Status.ACTIVE,
+        )
+        action = ProvisioningAction.objects.create(
+            customer_service=self.service,
+            action_type=ProvisioningAction.ActionType.MAILBOX_UPDATE,
+            payload={
+                "mailbox_id": mailbox.id,
+                "previous_quota_mb": 512,
+                "quota_mb": 768,
+            },
+        )
+        with patch(
+            "apps.services.management.commands.process_provisioning.run_local_mail_quota_operation",
+            side_effect=(CyberPanelError("Quota could not be updated."), None),
+        ), patch("apps.services.management.commands.process_provisioning.set_shared_hosting_disk_quota"), self.assertRaises(CyberPanelError):
+            process_mailbox_action(action)
+
+        mailbox.refresh_from_db()
+        self.assertEqual(mailbox.quota_mb, 512)
+        self.assertEqual(mailbox.last_error, "Quota could not be updated.")
+
+    def test_mailbox_import_reconciles_existing_server_mailbox_and_clears_stale_error(self):
+        mailbox = Mailbox.objects.create(
+            hosting_account=self.account,
+            domain=self.domain,
+            local_part="reconciled",
+            quota_mb=512,
+            used_mb=0,
+            status=Mailbox.Status.ERROR,
+            last_error="This mailbox already exists.",
+        )
+        with (
+            patch(
+                "apps.services.management.commands.sync_cyberpanel_services.run_local_mail_quota_operation",
+            ),
+            patch(
+                "apps.services.management.commands.sync_cyberpanel_services.set_shared_hosting_disk_quota",
+            ),
+        ):
+            sync_mailboxes(
+                self.account,
+                self.domain,
+                [{"email": mailbox.email_address, "used_mb": 1}],
+                email_limit=3,
+            )
+
+        mailbox.refresh_from_db()
+        self.assertEqual(mailbox.status, Mailbox.Status.ACTIVE)
+        self.assertEqual(mailbox.used_mb, 1)
+        self.assertEqual(mailbox.last_error, "")
+
+    def test_shared_storage_budget_reserves_mail_quota_from_website_quota(self):
+        Mailbox.objects.create(
+            hosting_account=self.account,
+            domain=self.domain,
+            local_part="storage",
+            quota_mb=3 * 1024,
+            used_mb=512,
+            status=Mailbox.Status.ACTIVE,
+        )
+        budget = mailbox_storage_budget(self.account)
+        self.assertEqual(budget["limit_mb"], 10 * 1024)
+        self.assertEqual(budget["web_used_mb"], 2 * 1024)
+        self.assertEqual(budget["allocated_mb"], 3 * 1024)
+        self.assertEqual(budget["available_mb"], 5 * 1024)
+
+        self.account.linux_username = "siteowner"
+        with patch("apps.services.storage.set_linux_user_disk_quota") as apply_quota:
+            set_shared_hosting_disk_quota(self.account)
+        apply_quota.assert_called_once_with("siteowner", 7 * 1024)
+
+    def test_linux_user_quota_accepts_enabled_quotaon_status(self):
+        with (
+            patch("apps.services.providers.cyberpanel.pwd.getpwnam"),
+            patch(
+                "apps.services.providers.cyberpanel.shutil.which",
+                side_effect=("/usr/sbin/quotaon", "/usr/sbin/setquota"),
+            ),
+            patch("apps.services.providers.cyberpanel.os.geteuid", return_value=0),
+            patch(
+                "apps.services.providers.cyberpanel.subprocess.run",
+                side_effect=(
+                    Mock(returncode=1, stdout="user quota on / (/dev/sda1) is on\n", stderr=""),
+                    Mock(returncode=0, stdout="", stderr=""),
+                ),
+            ) as run,
+        ):
+            set_linux_user_disk_quota("siteowner", 512)
+
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["/usr/sbin/setquota", "-u", "siteowner", "512M", "512M", "0", "0", "/"],
+        )
+
+    def test_mailbox_quota_writer_uses_cyberpanel_environment(self):
+        with (
+            patch(
+                "apps.services.providers.cyberpanel.shutil.which",
+                return_value="/usr/bin/doveadm",
+            ),
+            patch(
+                "apps.services.providers.cyberpanel.subprocess.run",
+                side_effect=(
+                    Mock(returncode=0, stdout='{"ok": true}\n', stderr=""),
+                    Mock(returncode=0, stdout="", stderr=""),
+                ),
+            ) as run,
+        ):
+            run_local_mail_quota_operation(
+                operation="set",
+                domain="quota-test.example.co.zw",
+                local_part="probe",
+                quota_mb=100,
+            )
+
+        self.assertEqual(run.call_args_list[0].kwargs["cwd"], "/usr/local/CyberCP")
+        self.assertIn("VARCHAR(320)", run.call_args_list[0].args[0][2])
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["/usr/bin/doveadm", "quota", "recalc", "-u", "probe@quota-test.example.co.zw"],
+        )
+
+    def test_mailbox_clear_expunge_is_scoped_and_verifies_zero_usage(self):
+        quota_output = "Quota name\tType\tValue\tLimit\t%\nUser quota\tSTORAGE\t0\t2097152\t0\n"
+        with (
+            patch("apps.services.providers.cyberpanel.shutil.which", return_value="/usr/bin/doveadm"),
+            patch(
+                "apps.services.providers.cyberpanel.subprocess.run",
+                side_effect=(
+                    Mock(returncode=0, stdout="INBOX\nINBOX.Deleted Items\nINBOX.Archive\n", stderr=""),
+                    Mock(returncode=0, stdout="", stderr=""),
+                    Mock(returncode=0, stdout="", stderr=""),
+                    Mock(returncode=0, stdout="", stderr=""),
+                    Mock(returncode=0, stdout="", stderr=""),
+                    Mock(returncode=0, stdout=quota_output, stderr=""),
+                    Mock(returncode=0, stdout='{"updated": 1}\n', stderr=""),
+                ),
+            ) as run,
+        ):
+            result = run_local_mail_operation(
+                operation="clear_storage",
+                domain="clear.example.co.zw",
+                local_part="user",
+            )
+
+        self.assertEqual(result, {"ok": True, "used_mb": 0})
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list[:-1]],
+            [
+                ["/usr/bin/doveadm", "mailbox", "list", "-u", "user@clear.example.co.zw"],
+                ["/usr/bin/doveadm", "expunge", "-u", "user@clear.example.co.zw", "mailbox", "INBOX", "ALL"],
+                ["/usr/bin/doveadm", "expunge", "-u", "user@clear.example.co.zw", "mailbox", "INBOX.Deleted Items", "ALL"],
+                ["/usr/bin/doveadm", "expunge", "-u", "user@clear.example.co.zw", "mailbox", "INBOX.Archive", "ALL"],
+                ["/usr/bin/doveadm", "quota", "recalc", "-u", "user@clear.example.co.zw"],
+                ["/usr/bin/doveadm", "-f", "tab", "quota", "get", "-u", "user@clear.example.co.zw"],
+            ],
+        )
+        self.assertEqual(
+            run.call_args_list[-1].args[0][:2],
+            ["/usr/local/CyberCP/bin/python", "-c"],
+        )
+        self.assertEqual(run.call_args_list[-1].kwargs["cwd"], "/usr/local/CyberCP")
+        self.assertIn(
+            "EUsers.objects.filter(email=d['email']).update(DiskUsage='0')",
+            run.call_args_list[-1].args[0][2],
+        )
+        self.assertIn("django.setup()", run.call_args_list[-1].args[0][2])
+
+    def test_paid_storage_extension_updates_shared_disk_limit(self):
+        self.account.linux_username = "siteowner"
+        self.account.save(update_fields=("linux_username",))
+        order = Order.objects.create(
+            customer=self.customer,
+            order_number="TEST-STORAGE-ORDER",
+            status=Order.Status.PAID,
+            total=Decimal("2.00"),
+        )
+        order_item = OrderItem.objects.create(
+            order=order,
+            addon=Addon.objects.get(slug="web-storage-5gb"),
+            description="Extra 5 GB SSD storage",
+            quantity=1,
+            unit_price=Decimal("2.00"),
+            subtotal=Decimal("2.00"),
+            metadata={
+                "period_months": 1,
+                "customer_service_uuid": str(self.service.uuid),
+            },
+        )
+        addon = HostingStorageAddon.objects.create(
+            customer_service=self.service,
+            order_item=order_item,
+            storage_gb=5,
+        )
+        action = ProvisioningAction(
+            customer_service=self.service,
+            action_type=ProvisioningAction.ActionType.HOSTING_STORAGE_UPDATE,
+            payload={"hosting_storage_addon_id": addon.id},
+        )
+
+        with patch("apps.services.management.commands.process_provisioning.set_shared_hosting_disk_quota") as apply_quota:
+            process_hosting_storage_action(action)
+
+        disk = self.account.resources.get(resource_type=HostingResource.ResourceType.DISK)
+        disk.refresh_from_db()
+        addon.refresh_from_db()
+        self.assertEqual(disk.limit_value, Decimal("15"))
+        self.assertEqual(addon.status, HostingStorageAddon.Status.ACTIVE)
+        self.assertGreater(addon.expires_at, addon.starts_at)
+        apply_quota.assert_called_once_with(self.account, total_limit_gb=Decimal("15.000000"))
+
+    def test_storage_extension_waits_for_confirmed_payment(self):
+        order = Order.objects.create(
+            customer=self.customer,
+            order_number="TEST-STORAGE-PENDING",
+            status=Order.Status.PROCESSING,
+            total=Decimal("2.00"),
+        )
+        OrderItem.objects.create(
+            order=order,
+            addon=Addon.objects.get(slug="web-storage-5gb"),
+            description="Extra 5 GB SSD storage",
+            quantity=1,
+            unit_price=Decimal("2.00"),
+            subtotal=Decimal("2.00"),
+            metadata={
+                "period_months": 1,
+                "type": "hosting_storage_extension",
+                "customer_service_uuid": str(self.service.uuid),
+            },
+        )
+        self.assertEqual(queue_hosting_storage_actions(25), 0)
+        self.assertFalse(HostingStorageAddon.objects.exists())
+        self.assertFalse(
+            ProvisioningAction.objects.filter(
+                action_type=ProvisioningAction.ActionType.HOSTING_STORAGE_UPDATE,
+            ).exists()
+        )
 
     def test_cloudflare_credentials_are_encrypted_and_never_returned(self):
         token = "CF-test-token-that-should-not-be-plain-text"
@@ -477,6 +1120,12 @@ class CustomerControlPanelApiTests(APITestCase):
         self.assertIsNone(self.zone.last_synced_at)
 
     def test_customer_can_connect_external_cloudflare_domain_to_hosting_service(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        self.service.expires_at = timezone.now() + timedelta(days=30)
+        self.service.save()
+        self.account.primary_domain = None
+        self.account.save()
         connection_obj = ProviderConnection.objects.create(
             customer=self.customer,
             provider=ProviderConnection.Provider.CLOUDFLARE,
@@ -505,16 +1154,14 @@ class CustomerControlPanelApiTests(APITestCase):
             )
 
         self.assertEqual(response.status_code, 201, response.data)
-        domain = DomainAsset.objects.get(domain_name="external.example")
-        self.assertEqual(domain.customer_service, self.service)
-        self.assertEqual(domain.nameservers, ["ns1.cloudflare.com", "ns2.cloudflare.com"])
-        self.assertEqual(domain.dns_zone.provider_connection, connection_obj)
-        self.assertEqual(domain.dns_zone.external_zone_id, "external-zone")
-        self.assertEqual(domain.dns_zone.status, DNSZone.Status.PENDING)
-        self.assertIsNone(domain.dns_zone.last_synced_at)
+        from apps.services.models import DomainConnection
+        connection = DomainConnection.objects.get(domain_name="external.example")
+        self.assertEqual(connection.customer_service, self.service)
+        self.assertEqual(connection.provider_connection, connection_obj)
+        self.assertEqual(connection.status, "awaiting_ownership")
+        self.assertFalse(DomainAsset.objects.filter(domain_name="external.example").exists())
         self.account.refresh_from_db()
-        self.assertEqual(self.account.primary_domain, self.domain)
-        self.assertEqual(ServiceAuditEvent.objects.get().event_type, "domain.cloudflare.connected")
+        self.assertIsNone(self.account.primary_domain)
 
     def test_external_domain_connection_rejects_zones_not_in_verified_cloudflare_account(self):
         connection_obj = ProviderConnection.objects.create(
@@ -596,19 +1243,60 @@ class CustomerControlPanelApiTests(APITestCase):
         self.assertEqual(request.call_count, 2)
         self.assertEqual(request.call_args_list[1].kwargs["query"]["page"], 2)
 
-    def test_retry_of_mailbox_already_created_sets_the_new_chosen_password(self):
-        listed = '[{"email":"sales@example.co.zw"}]'
-        with patch(
-            "apps.services.providers.cyberpanel.subprocess.run",
-            side_effect=[
-                Mock(returncode=0, stdout=listed, stderr=""),
-                Mock(returncode=0, stdout='{"ok":true,"message":"None"}', stderr=""),
-                Mock(returncode=0, stdout=listed, stderr=""),
-            ],
-        ) as run:
-            result = run_local_mail_operation(
-                operation="create", domain="example.co.zw", local_part="sales",
-                password="A-strong-new-password-123!",
-            )
-        self.assertTrue(result["already_exists"])
-        self.assertEqual(run.call_count, 3)
+    def test_mailbox_create_uses_structured_helper_and_keeps_password_out_of_argv(self):
+        for already_exists in (False, True):
+            with self.subTest(already_exists=already_exists), patch(
+                "apps.services.providers.cyberpanel.subprocess.run",
+                return_value=Mock(returncode=0, stdout='1,None\n' + json.dumps({"ok": True, "already_exists": already_exists}), stderr=""),
+            ) as run:
+                result = run_local_mail_operation(
+                    operation="create", domain="example.co.zw", local_part="sales", password="chosen-password",
+                )
+                self.assertEqual(result["already_exists"], already_exists)
+                self.assertEqual(run.call_count, 1)
+                self.assertNotIn("chosen-password", str(run.call_args.args))
+                self.assertEqual(json.loads(run.call_args.kwargs["input"])["password"], "chosen-password")
+                script = run.call_args.args[0][2]
+                self.assertNotIn("listEmailsJson", script)
+                self.assertIn("bcrypt.checkpw", script)
+
+    def test_delete_returns_json_and_dashboard_tracks_completion(self):
+        mailbox = Mailbox.objects.create(hosting_account=self.account, domain=self.domain,
+            local_part="delete-response", quota_mb=100, status=Mailbox.Status.ACTIVE)
+        response = self.client.delete(f"/api/v1/services/mailboxes/{mailbox.id}/")
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["status"], "deleting")
+        dashboard = self.client.get("/api/v1/services/dashboard/")
+        rows = [row for service in dashboard.data["services"] if service["hosting"] for row in service["hosting"]["mailboxes"]]
+        self.assertEqual(next(row for row in rows if row["id"] == mailbox.id)["pending_action"], "mailbox_delete")
+        mailbox.status = Mailbox.Status.DELETED
+        mailbox.save()
+        dashboard = self.client.get("/api/v1/services/dashboard/")
+        rows = [row for service in dashboard.data["services"] if service["hosting"] for row in service["hosting"]["mailboxes"]]
+        self.assertNotIn(mailbox.id, [row["id"] for row in rows])
+
+    def test_deleted_mailbox_stays_deleted_when_quota_cleanup_fails(self):
+        mailbox = Mailbox.objects.create(hosting_account=self.account, domain=self.domain,
+            local_part="deleted-cleanup", quota_mb=100, status=Mailbox.Status.DELETING)
+        action = ProvisioningAction.objects.create(customer_service=self.service,
+            action_type=ProvisioningAction.ActionType.MAILBOX_DELETE, payload={"mailbox_id": mailbox.id})
+        with patch("apps.services.management.commands.process_provisioning.run_local_mail_operation"), patch(
+            "apps.services.management.commands.process_provisioning.run_local_mail_quota_operation",
+            side_effect=CyberPanelError("Quota cleanup failed"),
+        ), self.assertRaises(CyberPanelError):
+            process_mailbox_action(action)
+        mailbox.refresh_from_db()
+        self.assertEqual(mailbox.status, Mailbox.Status.DELETED)
+
+    def test_unexpected_mailbox_exception_is_reported_instead_of_leaving_pending(self):
+        mailbox = Mailbox.objects.create(hosting_account=self.account, domain=self.domain,
+            local_part="unexpected-error", quota_mb=100, status=Mailbox.Status.CLEARING)
+        action = ProvisioningAction.objects.create(customer_service=self.service,
+            action_type=ProvisioningAction.ActionType.MAILBOX_CLEAR_STORAGE, payload={"mailbox_id": mailbox.id})
+        with patch("apps.services.management.commands.process_provisioning.run_local_mail_operation",
+            side_effect=ValueError("private provider data")), self.assertRaises(CyberPanelError):
+            process_mailbox_action(action)
+        mailbox.refresh_from_db()
+        self.assertEqual(mailbox.status, Mailbox.Status.ACTIVE)
+        self.assertIn("unexpectedly", mailbox.last_error)
+        self.assertNotIn("private provider data", mailbox.last_error)

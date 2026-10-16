@@ -74,7 +74,7 @@ class Command(BaseCommand):
                         for mailbox in mailboxes.iterator(chunk_size=50):
                             run_local_mail_operation(
                                 operation="change_password",
-                                domain=mailbox.domain.domain_name,
+                                domain=mailbox.effective_domain,
                                 local_part=mailbox.local_part,
                                 password=generate_owner_password(),
                             )

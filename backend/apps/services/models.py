@@ -3,6 +3,7 @@ import uuid
 from django.conf import settings
 from django.core.validators import MinValueValidator, RegexValidator
 from django.db import models
+from django.db.models import Q
 
 from apps.catalog.models import Product
 from apps.orders.models import OrderItem
@@ -219,6 +220,7 @@ class HostingAccount(models.Model):
     server_name = models.CharField(max_length=150, blank=True)
     external_account_id = models.CharField(max_length=255, blank=True)
     username = models.CharField(max_length=150, blank=True)
+    linux_username = models.CharField(max_length=150, blank=True)
     primary_domain = models.ForeignKey(
         DomainAsset,
         on_delete=models.SET_NULL,
@@ -229,6 +231,41 @@ class HostingAccount(models.Model):
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+
+class HostingWebsite(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Provisioning"
+        ACTIVE = "active", "Active"
+        ERROR = "error", "Setup failed"
+
+    class CertificateStatus(models.TextChoices):
+        NOT_INSTALLED = "not_installed", "Not installed"
+        PENDING = "pending", "Installing"
+        ACTIVE = "active", "Installed"
+        ERROR = "error", "Installation failed"
+
+    hosting_account = models.ForeignKey(
+        HostingAccount,
+        on_delete=models.CASCADE,
+        related_name="websites",
+    )
+    domain_name = models.CharField(max_length=253, unique=True)
+    master_domain = models.CharField(max_length=253)
+    document_root = models.CharField(max_length=512, blank=True)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    last_error = models.TextField(blank=True)
+    certificate_status = models.CharField(
+        max_length=14,
+        choices=CertificateStatus.choices,
+        default=CertificateStatus.NOT_INSTALLED,
+    )
+    certificate_error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("domain_name",)
 
 
 class HostingResource(models.Model):
@@ -269,11 +306,39 @@ class HostingResource(models.Model):
         ]
 
 
+class HostingStorageAddon(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACTIVE = "active", "Active"
+        ERROR = "error", "Error"
+        EXPIRING = "expiring", "Expiring"
+        EXPIRED = "expired", "Expired"
+
+    customer_service = models.ForeignKey(
+        CustomerService,
+        on_delete=models.PROTECT,
+        related_name="storage_addons",
+    )
+    order_item = models.OneToOneField(
+        OrderItem,
+        on_delete=models.PROTECT,
+        related_name="hosting_storage_addon",
+    )
+    storage_gb = models.DecimalField(max_digits=8, decimal_places=2, validators=[MinValueValidator(0.01)])
+    status = models.CharField(max_length=8, choices=Status.choices, default=Status.PENDING, db_index=True)
+    starts_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
 class Mailbox(models.Model):
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
         ACTIVE = "active", "Active"
         SUSPENDED = "suspended", "Suspended"
+        CLEARING = "clearing", "Clearing storage"
         DELETING = "deleting", "Deletion pending"
         DELETED = "deleted", "Deleted"
         ERROR = "error", "Error"
@@ -284,6 +349,7 @@ class Mailbox(models.Model):
         related_name="mailboxes",
     )
     domain = models.ForeignKey(DomainAsset, on_delete=models.PROTECT, related_name="mailboxes")
+    email_domain = models.CharField(max_length=253, blank=True, default="")
     local_part = models.CharField(
         max_length=64,
         validators=[RegexValidator(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+$")],
@@ -292,13 +358,14 @@ class Mailbox(models.Model):
     used_mb = models.PositiveIntegerField(default=0)
     external_mailbox_id = models.CharField(max_length=255, blank=True)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING, db_index=True)
+    last_error = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=("domain", "local_part"),
+                fields=("domain", "email_domain", "local_part"),
                 name="uq_mailbox_domain_local_part",
             ),
             models.CheckConstraint(condition=models.Q(quota_mb__gte=1), name="ck_mailbox_quota"),
@@ -306,8 +373,12 @@ class Mailbox(models.Model):
         ]
 
     @property
+    def effective_domain(self):
+        return self.email_domain or self.domain.domain_name
+
+    @property
     def email_address(self):
-        return f"{self.local_part}@{self.domain.domain_name}"
+        return f"{self.local_part}@{self.effective_domain}"
 
 
 class MailboxAccess(models.Model):
@@ -384,6 +455,10 @@ class ProvisioningAction(models.Model):
         MAILBOX_UPDATE = "mailbox_update", "Update mailbox"
         MAILBOX_DELETE = "mailbox_delete", "Delete mailbox"
         MAILBOX_PASSWORD_RESET = "mailbox_pw_reset", "Reset mailbox password"
+        MAILBOX_CLEAR_STORAGE = "mailbox_clear_storage", "Clear mailbox storage"
+        HOSTING_WEBSITE_CREATE = "hosting_site_create", "Create hosting website"
+        HOSTING_WEBSITE_CERTIFICATE = "hosting_site_cert", "Install website certificate"
+        HOSTING_STORAGE_UPDATE = "hosting_storage_update", "Update hosting storage"
         HOSTING_SUSPEND = "hosting_suspend", "Suspend hosting"
         HOSTING_UNSUSPEND = "hosting_unsuspend", "Unsuspend hosting"
         HOSTING_SYNC = "hosting_sync", "Sync hosting usage"
@@ -409,7 +484,7 @@ class ProvisioningAction(models.Model):
         blank=True,
         related_name="provisioning_actions",
     )
-    action_type = models.CharField(max_length=20, choices=ActionType.choices)
+    action_type = models.CharField(max_length=28, choices=ActionType.choices)
     payload = models.JSONField(default=dict)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING, db_index=True)
     attempts = models.PositiveIntegerField(default=0)
@@ -443,4 +518,53 @@ class ServiceAuditEvent(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
+        ordering = ("-created_at",)
+
+
+class DomainConnection(models.Model):
+    """A customer-scoped claim; only verified claims can reserve a DomainAsset."""
+    class Mode(models.TextChoices):
+        MANAGED = "managed", "Use TechInn DNS"
+        EXTERNAL = "external", "Keep existing DNS"
+        CLOUDFLARE = "cloudflare", "Use my Cloudflare account"
+
+    customer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="domain_connections")
+    customer_service = models.OneToOneField(
+        CustomerService,
+        on_delete=models.PROTECT,
+        related_name="domain_connection",
+        null=True,
+        blank=True,
+    )
+    domain_name = models.CharField(max_length=253)
+    mode = models.CharField(max_length=12, choices=Mode.choices)
+    services = models.CharField(max_length=8, choices=(("website", "Website"), ("email", "Email"), ("both", "Website and email")))
+    provider_connection = models.ForeignKey("ProviderConnection", null=True, blank=True, on_delete=models.SET_NULL)
+    external_zone_id = models.CharField(max_length=255, blank=True)
+    verification_token = models.CharField(max_length=96)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    domain = models.ForeignKey(DomainAsset, null=True, blank=True, on_delete=models.PROTECT)
+    status = models.CharField(max_length=20, default="awaiting_ownership")
+    nameservers = models.JSONField(default=list)
+    previous_records = models.JSONField(default=list)
+    required_records = models.JSONField(default=list)
+    imported_records = models.JSONField(default=list)
+    review_approved_at = models.DateTimeField(null=True, blank=True)
+    dns_applied_at = models.DateTimeField(null=True, blank=True)
+    checks = models.JSONField(default=dict)
+    last_error = models.TextField(blank=True)
+    last_checked_at = models.DateTimeField(null=True, blank=True)
+    next_check_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("customer", "domain_name"), name="uq_customer_domain_connection"),
+            models.UniqueConstraint(
+                fields=("domain_name",),
+                condition=Q(verified_at__isnull=False),
+                name="uq_verified_domain_connection",
+            ),
+        ]
         ordering = ("-created_at",)

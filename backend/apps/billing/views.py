@@ -41,6 +41,7 @@ from apps.billing.serializers import (
 )
 from apps.catalog.models import Product
 from apps.orders.models import Order, OrderItem
+from apps.services.models import CustomerService
 
 
 FINAL_PAYMENT_STATUSES = {
@@ -105,6 +106,7 @@ def _invoice_for_paid_order(order):
             status=Invoice.Status.PAID,
             currency=order.currency,
             subtotal=order.subtotal,
+            discount_total=order.discount_total,
             tax_total=order.tax_total,
             total=order.total,
             amount_paid=order.total,
@@ -112,25 +114,34 @@ def _invoice_for_paid_order(order):
         )
     else:
         invoice.status = Invoice.Status.PAID
+        invoice.discount_total = order.discount_total
         invoice.amount_paid = invoice.total
         invoice.paid_at = invoice.paid_at or timezone.now()
-        invoice.save(update_fields=("status", "amount_paid", "paid_at", "updated_at"))
+        invoice.save(update_fields=("status", "discount_total", "amount_paid", "paid_at", "updated_at"))
 
     if not invoice.items.exists():
         items = OrderItem.objects.filter(order=order).select_related("product", "addon").prefetch_related("customer_services")
-        InvoiceItem.objects.bulk_create([
-            InvoiceItem(
+        invoice_items = []
+        for item in items:
+            customer_service = item.customer_services.first()
+            if not customer_service:
+                service_uuid = (item.metadata or {}).get("customer_service_uuid")
+                if service_uuid:
+                    customer_service = CustomerService.objects.filter(
+                        uuid=service_uuid,
+                        customer=order.customer,
+                    ).first()
+            invoice_items.append(InvoiceItem(
                 invoice=invoice,
-                customer_service=item.customer_services.first(),
+                customer_service=customer_service,
                 product=item.product,
                 addon=item.addon,
                 description=item.description,
                 quantity=item.quantity,
                 unit_price=item.unit_price,
                 subtotal=item.subtotal,
-            )
-            for item in items
-        ])
+            ))
+        InvoiceItem.objects.bulk_create(invoice_items)
     return invoice
 
 
@@ -299,7 +310,10 @@ class CustomerCheckoutView(APIView):
                     amount=order.total,
                     currency=order.currency,
                     status=Payment.Status.PENDING,
-                    provider_data={"method": payload["payment_method"]},
+                    provider_data={
+                        "method": payload["payment_method"],
+                        **({"test_checkout": True} if order.metadata.get("test_checkout") else {}),
+                    },
                 )
                 _create_attempt(
                     payment,

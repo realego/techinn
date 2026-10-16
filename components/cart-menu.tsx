@@ -70,6 +70,7 @@ export function CartMenu() {
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium">{line.domainName ?? line.product.name}</p>
+                        {line.serviceName && <p className="truncate text-xs text-muted-foreground">For {line.serviceName}</p>}
                         <p className="text-muted-foreground mt-0.5 text-xs">
                           ${line.unitPrice.toFixed(2)} {line.cadence}
                         </p>

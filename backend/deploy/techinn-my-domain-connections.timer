@@ -1,0 +1,10 @@
+[Unit]
+Description=Check customer domain connection progress
+
+[Timer]
+OnBootSec=90sec
+OnUnitActiveSec=1min
+Unit=techinn-my-domain-connections.service
+
+[Install]
+WantedBy=timers.target

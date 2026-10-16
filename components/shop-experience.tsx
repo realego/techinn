@@ -1,8 +1,8 @@
 "use client";
 
 import {
-  AppWindow,   ArrowDownWideNarrow, ArrowRight, Check, ChevronDown, ChevronRight, Globe2, HardDrive, Info,
-  LayoutGrid, Mail, Monitor, PanelLeft, Plus, Search, Server, ShoppingBag, ShoppingCart, SlidersHorizontal, X,
+  AppWindow,   ArrowDownWideNarrow, ArrowRight,   Bot, Check, ChevronDown, ChevronRight, Globe2, HardDrive, Info,
+LayoutGrid, Mail, Monitor, PanelLeft, Plus, Search, Server, ShoppingBag, ShoppingCart, SlidersHorizontal, X,
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -28,12 +28,13 @@ const categories = [
   { name: "Email Hosting" as const, label: "Email hosting", icon: Mail },
   { name: "Domains" as const, label: "Domains", icon: Globe2 },
   { name: "Website Design" as const, label: "Website design", icon: Monitor },
+  { name: "Chatbot Development" as const, label: "Chatbot development", icon: Bot },
   { name: "App Development" as const, label: "App development", icon: AppWindow },
 ];
 
 const categoryServices: Record<ShopCategory, string> = {
   All: "", "Web Hosting": "web", "Email Hosting": "email", Domains: "domains",
-  "Website Design": "website", "App Development": "app",
+  "Website Design": "website", "Chatbot Development": "chatbot", "App Development": "app",
 };
 
 // Adapted from shadcn sidebar-07: keep the icon rail within the shop below the site header.
@@ -117,6 +118,8 @@ function simpleExplanation(product: ShopProduct) {
       return `Your business’s address on the internet. For example, customers can type yourbusiness.co.zw to find your website and recognize your email address.`;
     case "App Development":
       return `A mobile app designed for your business. For example, customers could browse your services, book an appointment, or check updates from their phone.`;
+    case "Chatbot Development":
+      return `A virtual assistant for your business website that can answer common questions, share product information, and notify you when customers need help.`;
   }
 }
 
@@ -585,7 +588,7 @@ export function ShopExperience() {
             <div className="px-4 py-6 sm:px-6 sm:py-8">
               <div className="mb-2 flex items-center gap-2"><span className="bg-brand size-1.5 rounded-full" /><span className="text-muted-foreground text-[10px] font-medium uppercase tracking-[.16em]">TechInn services</span></div>
               <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">{category === "All" ? <>Build your <span className="text-orange-600 dark:text-orange-400">online presence.</span></> : selectedCategory.label}</h1>
-              <p className="text-muted-foreground mt-2 max-w-xl text-xs leading-relaxed sm:text-sm">{category === "Website Design" ? "Start with a five-page website from $60. Add the features your business needs, each with its own price." : "Find your domain, hosting, email, and website services in one place."}</p>
+              <p className="text-muted-foreground mt-2 max-w-xl text-xs leading-relaxed sm:text-sm">{category === "Website Design" ? "Start with a five-page website from $60. Add the features your business needs, each with its own price." : category === "Chatbot Development" ? "Start with a business assistant from $80. Add conversations, payment, booking, and support features as needed." : "Find your domain, hosting, email, and website services in one place."}</p>
             </div>
             <div className="flex flex-col gap-3 border-y bg-muted/20 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6">
               <div className="relative min-w-0 sm:w-72">

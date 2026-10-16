@@ -50,11 +50,11 @@ const DEFAULT_HERO_BADGE = (
 
 const DEFAULT_HERO_MOCKUP = (
   <Screenshot
-    srcLight="/dashboard-light.png"
-    srcDark="/dashboard-dark.png"
+    srcLight="/dashboard-light.jpeg"
+    srcDark="/dashboard-dark.jpeg"
     alt="Website project dashboard preview"
-    width={1248}
-    height={765}
+    width={1600}
+    height={741}
     loading="eager"
     className="w-full"
   />

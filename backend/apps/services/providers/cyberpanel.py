@@ -1,10 +1,17 @@
 """CyberPanel API operations used by the service provisioning workers."""
+import base64
+import hashlib
+import hmac
 import json
 import os
+import pwd
 import re
 import secrets
+import shutil
 import subprocess
 import string
+import time
+from pathlib import Path
 
 import requests
 from django.conf import settings
@@ -87,8 +94,8 @@ class CyberPanelClient:
         elif str(result.get("createWebSiteStatus", result.get("status", "0"))) != "1":
             raise CyberPanelError("CyberPanel could not create the website.")
         result.setdefault("websiteOwner", username)
+        result.setdefault("linux_username", username)
         return result
-
     def set_website_status(self, *, domain, state):
         if state not in {"Suspend", "Un-Suspend"}:
             raise CyberPanelError("Unsupported CyberPanel website status change.")
@@ -97,10 +104,198 @@ class CyberPanelClient:
             raise CyberPanelError("CyberPanel could not change the website status.")
         return result
 
+    def create_child_website(self, *, master_domain, child_domain, username, plan_expires):
+        if not self.configured:
+            raise CyberPanelError("CyberPanel API is not configured.")
+        try:
+            secret = Path("/etc/techinn/portal-sso.key").read_bytes()
+        except OSError as error:
+            raise CyberPanelError("Secure CyberPanel provisioning is unavailable.") from error
+        payload = {
+            "master_domain": master_domain,
+            "child_domain": child_domain,
+            "username": username,
+            "plan_expires": plan_expires,
+            "issued_at": time.time(),
+            "nonce": secrets.token_hex(32),
+        }
+        encoded = base64.urlsafe_b64encode(
+            json.dumps(payload, separators=(",", ":")).encode()
+        ).rstrip(b"=").decode()
+        signature = hmac.new(secret, encoded.encode(), hashlib.sha256).hexdigest()
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/techinn/create-child/",
+                json={"ticket": f"{encoded}.{signature}"},
+                headers={"Origin": "https://my.techinn.co.zw"},
+                timeout=(5, 80),
+                verify=True,
+            )
+            result = response.json()
+        except (requests.RequestException, ValueError) as error:
+            raise CyberPanelError("CyberPanel could not create the subdomain website.") from error
+        if response.status_code >= 400:
+            detail = result.get("detail") if isinstance(result, dict) else None
+            raise CyberPanelError(
+                detail if isinstance(detail, str) and detail else
+                "The subdomain website could not be created. Check your hosting plan and try again."
+            )
+        if (
+            not isinstance(result, dict)
+            or result.get("success") is not True
+            or result.get("domain") != child_domain
+            or not isinstance(result.get("document_root"), str)
+        ):
+            detail = result.get("detail") if isinstance(result, dict) else None
+            raise CyberPanelError(
+                detail if isinstance(detail, str) and detail else
+                "The subdomain website could not be created. Check your hosting plan and try again."
+            )
+        return result
+
+    def install_child_certificate(self, *, master_domain, child_domain, username, plan_expires):
+        if not self.configured:
+            raise CyberPanelError("Secure website certificate installation is unavailable.")
+        try:
+            secret = Path("/etc/techinn/portal-sso.key").read_bytes()
+        except OSError as error:
+            raise CyberPanelError("Secure website certificate installation is unavailable.") from error
+        payload = {
+            "master_domain": master_domain,
+            "child_domain": child_domain,
+            "username": username,
+            "plan_expires": plan_expires,
+            "issued_at": time.time(),
+            "nonce": secrets.token_hex(32),
+        }
+        encoded = base64.urlsafe_b64encode(
+            json.dumps(payload, separators=(",", ":")).encode()
+        ).rstrip(b"=").decode()
+        signature = hmac.new(secret, encoded.encode(), hashlib.sha256).hexdigest()
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/techinn/install-certificate/",
+                json={"ticket": f"{encoded}.{signature}"},
+                headers={"Origin": "https://my.techinn.co.zw"},
+                timeout=(5, 180),
+                verify=True,
+            )
+            result = response.json()
+        except (requests.RequestException, ValueError) as error:
+            raise CyberPanelError("The website certificate could not be installed. Check DNS and try again.") from error
+        if (
+            response.status_code >= 400
+            or not isinstance(result, dict)
+            or result.get("success") is not True
+            or result.get("domain") != child_domain
+        ):
+            detail = result.get("detail") if isinstance(result, dict) else None
+            raise CyberPanelError(
+                detail if isinstance(detail, str) and detail else
+                "The website certificate could not be installed. Check DNS and try again."
+            )
+        return result
+
+
+def set_linux_user_disk_quota(username, limit_mb):
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", username or ""):
+        raise CyberPanelError("The hosting filesystem owner is invalid.")
+    try:
+        pwd.getpwnam(username)
+    except KeyError as error:
+        raise CyberPanelError("The hosting filesystem owner does not exist.") from error
+    if not isinstance(limit_mb, int) or limit_mb < 1:
+        raise CyberPanelError("The hosting storage limit must be at least 1 MB.")
+    quotaon = shutil.which("quotaon")
+    setquota = shutil.which("setquota")
+    if not quotaon or not setquota or os.geteuid() != 0:
+        raise CyberPanelError("Filesystem storage enforcement is not available.")
+    try:
+        enabled = subprocess.run(
+            [quotaon, "-p", "-u", "/"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        enabled_output = f"{enabled.stdout}\n{enabled.stderr}".lower()
+        if "user quota on /" not in enabled_output or "is on" not in enabled_output:
+            raise CyberPanelError("Filesystem storage enforcement is not enabled.")
+        result = subprocess.run(
+            [setquota, "-u", username, f"{limit_mb}M", f"{limit_mb}M", "0", "0", "/"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CyberPanelError("The hosting storage limit could not be applied.") from error
+    if result.returncode != 0:
+        raise CyberPanelError("The hosting storage limit could not be applied.")
+
+
+def run_local_mail_quota_operation(*, operation, domain, local_part, quota_mb=None):
+    if operation not in {"set", "delete"}:
+        raise CyberPanelError("Unsupported mailbox storage operation.")
+    if not re.fullmatch(r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}", domain):
+        raise CyberPanelError("Invalid mailbox domain.")
+    if not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}", local_part):
+        raise CyberPanelError("Invalid mailbox name.")
+    if operation == "set" and (not isinstance(quota_mb, int) or quota_mb < 1):
+        raise CyberPanelError("Mailbox storage allocation must be at least 1 MB.")
+    script = "\n".join((
+        "import json, sys",
+        "from django.db import connection",
+        "d = json.load(sys.stdin)",
+        "with connection.cursor() as cursor:",
+        "    cursor.execute(\"CREATE TABLE IF NOT EXISTS techinn_mailbox_quotas (email VARCHAR(320) NOT NULL PRIMARY KEY, quota_mb INT UNSIGNED NOT NULL, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4\")",
+        "    if d['operation'] == 'set':",
+        "        cursor.execute('INSERT INTO techinn_mailbox_quotas (email, quota_mb) VALUES (%s, %s) ON DUPLICATE KEY UPDATE quota_mb=VALUES(quota_mb)', [d['email'], d['quota_mb']])",
+        "    else:",
+        "        cursor.execute('DELETE FROM techinn_mailbox_quotas WHERE email=%s', [d['email']])",
+        "print(json.dumps({'ok': True}))",
+    ))
+    email = f"{local_part.lower()}@{domain.lower()}"
+    payload = {"operation": operation, "email": email, "quota_mb": quota_mb}
+    env = os.environ.copy()
+    env["DJANGO_SETTINGS_MODULE"] = "CyberCP.settings"
+    try:
+        result = subprocess.run(
+            ["/usr/local/CyberCP/bin/python", "-c", script],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+            env=env,
+            cwd="/usr/local/CyberCP",
+        )
+        response = json.loads(result.stdout.splitlines()[-1])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError) as error:
+        raise CyberPanelError("The mailbox storage allocation could not be saved.") from error
+    if response.get("ok") is not True:
+        raise CyberPanelError("The mailbox storage allocation could not be saved.")
+    if operation == "set":
+        doveadm = shutil.which("doveadm")
+        if not doveadm:
+            raise CyberPanelError("Mailbox storage enforcement is not available.")
+        try:
+            result = subprocess.run(
+                [doveadm, "quota", "recalc", "-u", email],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise CyberPanelError("The mailbox storage limit could not be applied.") from error
+        if result.returncode != 0:
+            raise CyberPanelError("The mailbox storage limit could not be applied.")
+
 
 def run_local_mail_operation(*, operation, domain, local_part, password=None):
     """Call CyberPanel's own mail utility without putting passwords in argv."""
-    if operation not in {"create", "delete", "change_password"}:
+    if operation not in {"create", "delete", "change_password", "clear_storage"}:
         raise CyberPanelError("Unsupported CyberPanel mail operation.")
     if not re.fullmatch(r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}", domain):
         raise CyberPanelError("Invalid mailbox domain.")
@@ -108,71 +303,128 @@ def run_local_mail_operation(*, operation, domain, local_part, password=None):
         raise CyberPanelError("Invalid mailbox name.")
     if operation in {"create", "change_password"} and (not password or len(password) < 8):
         raise CyberPanelError("Mailbox passwords must contain at least 8 characters.")
-    if operation == "create":
-        # Follow the working portal: use the supported command and independently
-        # confirm creation through the mail server's JSON mailbox listing.
+    if operation == "clear_storage":
+        doveadm = shutil.which("doveadm")
+        if not doveadm:
+            raise CyberPanelError("Mailbox storage cleanup is not available.")
+        email = f"{local_part.lower()}@{domain.lower()}"
+
+        def run_doveadm(command, failure_message):
+            try:
+                result = subprocess.run(
+                    command, capture_output=True, text=True, timeout=120, check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as error:
+                raise CyberPanelError(failure_message) from error
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout).strip()
+                detail = detail.replace(email, "this mailbox")[:180]
+                suffix = f": {detail}" if detail else ""
+                raise CyberPanelError(f"{failure_message}{suffix}")
+            return result
+
+        mailbox_result = run_doveadm(
+            [doveadm, "mailbox", "list", "-u", email],
+            "Mailbox folders could not be listed.",
+        )
+        mailboxes = [name.strip() for name in mailbox_result.stdout.splitlines() if name.strip()]
+        for mailbox_name in mailboxes:
+            run_doveadm(
+                [doveadm, "expunge", "-u", email, "mailbox", mailbox_name, "ALL"],
+                "Stored mailbox messages could not be cleared.",
+            )
+        run_doveadm(
+            [doveadm, "quota", "recalc", "-u", email],
+            "Mailbox usage could not be recalculated.",
+        )
+        try:
+            result = subprocess.run(
+                [doveadm, "-f", "tab", "quota", "get", "-u", email],
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise CyberPanelError("Mailbox storage cleanup could not be verified.") from error
+        if result.returncode != 0:
+            raise CyberPanelError("Mailbox storage cleanup could not be verified.")
+        storage_rows = [
+            line.split("\t")
+            for line in result.stdout.splitlines()[1:]
+            if len(line.split("\t")) >= 3 and line.split("\t")[1] == "STORAGE"
+        ]
+        if len(storage_rows) != 1:
+            raise CyberPanelError("Mailbox storage cleanup could not be verified.")
+        try:
+            remaining_kb = int(storage_rows[0][2])
+        except ValueError as error:
+            raise CyberPanelError("Mailbox storage cleanup could not be verified.") from error
+        if remaining_kb != 0:
+            raise CyberPanelError("Some mailbox storage remains in use; the cleanup was not confirmed.")
+        update_usage_script = "\n".join((
+            "import json, sys",
+            "import django",
+            "django.setup()",
+            "from mailServer.models import EUsers",
+            "d = json.load(sys.stdin)",
+            "updated = EUsers.objects.filter(email=d['email']).update(DiskUsage='0')",
+            "print(json.dumps({'updated': updated}))",
+        ))
         env = os.environ.copy()
         env["DJANGO_SETTINGS_MODULE"] = "CyberCP.settings"
-        address = f"{local_part.lower()}@{domain.lower()}"
-
-        def existing_addresses():
-            result = subprocess.run(
-                ["/usr/bin/cyberpanel", "listEmailsJson", "--domainName", domain.lower()],
-                capture_output=True, text=True, timeout=30, check=False, env=env,
-            )
-            if result.returncode != 0:
-                raise CyberPanelError("The mail server could not check existing mailboxes.")
-            try:
-                rows = json.loads(result.stdout.strip())
-                if isinstance(rows, str):
-                    rows = json.loads(rows)
-                return {row["email"].lower() for row in rows}
-            except (ValueError, TypeError, KeyError):
-                raise CyberPanelError("The mail server returned an unreadable mailbox list.")
-
         try:
-            if address in existing_addresses():
-                # A previous create may have reached the server before the worker
-                # lost its confirmation. A retry includes a new customer-chosen
-                # password, so apply it to the existing mailbox and confirm it.
-                run_local_mail_operation(
-                    operation="change_password", domain=domain,
-                    local_part=local_part, password=password,
-                )
-                if address not in existing_addresses():
-                    raise CyberPanelError("The existing mailbox could not be confirmed after its password update.")
-                return {"ok": True, "already_exists": True}
             result = subprocess.run(
-                ["/usr/bin/cyberpanel", "createEmail", "--domainName", domain.lower(),
-                 "--userName", local_part.lower(), "--password", password],
-                capture_output=True, text=True, timeout=60, check=False, env=env,
+                ["/usr/local/CyberCP/bin/python", "-c", update_usage_script],
+                input=json.dumps({"email": email}),
+                capture_output=True, text=True, timeout=30, check=True,
+                cwd="/usr/local/CyberCP", env=env,
             )
-            created = address in existing_addresses()
-        except (OSError, subprocess.SubprocessError) as error:
-            raise CyberPanelError("The mail server could not complete mailbox creation.") from error
-        if not created:
-            try:
-                response = json.loads(result.stdout.strip())
-            except (ValueError, TypeError):
-                response = {}
-            detail = str(response.get("errorMessage") or result.stderr.strip()
-                         or "The mail server did not confirm the new mailbox.")[:180]
-            detail = detail.replace(address, "this mailbox").replace(password, "[hidden]")
-            raise CyberPanelError(detail)
-        return {"ok": True}
-
+            if json.loads(result.stdout.splitlines()[-1]).get("updated") != 1:
+                raise CyberPanelError("Mailbox usage could not be recorded after cleanup.")
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError) as error:
+            raise CyberPanelError("Mailbox usage could not be recorded after cleanup.") from error
+        return {"ok": True, "used_mb": 0}
     script = "\n".join((
-        "import json, sys",
+        "import json, shutil, sys, bcrypt",
+        "import django",
+        "django.setup()",
+        "from pathlib import Path",
+        "from django.db import transaction",
+        "from mailServer.models import EUsers",
         "from plogical.mailUtilities import mailUtilities",
         "d = json.load(sys.stdin)",
+        "already_exists = EUsers.objects.filter(email=d['email']).exists()",
         "if d['operation'] == 'create':",
-        "    result = mailUtilities.createEmailAccount(d['domain'], d['local_part'], d['password'])",
+        "    if already_exists:",
+        "        result = mailUtilities.changeEmailPassword(d['email'], d['password'])",
+        "        result = (1, 'None') if result == (0, 'None') else result",
+        "    else:",
+        "        result = mailUtilities.createEmailAccount(d['domain'], d['local_part'], d['password'])",
         "elif d['operation'] == 'change_password':",
         "    result = mailUtilities.changeEmailPassword(d['email'], d['password'])",
         "    result = (1, 'None') if result == (0, 'None') else result",
         "else:",
-        "    result = mailUtilities.deleteEmailAccount(d['email'])",
-        "print(json.dumps({'ok': bool(result and result[0] == 1), 'message': str(result[1]) if result and len(result) > 1 else ''}))",
+        "    root = Path('/home/vmail').resolve()",
+        "    domain_root = root / d['domain']",
+        "    resolved_domain_root = domain_root.resolve()",
+        "    if resolved_domain_root.parent != root:",
+        "        raise ValueError('Mailbox domain storage path is outside the mail storage root.')",
+        "    account_path = domain_root / d['local_part']",
+        "    if account_path.parent != domain_root or account_path.name in ('', '.', '..'):",
+        "        raise ValueError('Invalid mailbox storage path.')",
+        "    with transaction.atomic():",
+        "        EUsers.objects.filter(email=d['email']).delete()",
+        "    if account_path.is_symlink():",
+        "        account_path.unlink()",
+        "    elif account_path.exists():",
+        "        resolved_account_path = account_path.resolve()",
+        "        if resolved_account_path.parent != resolved_domain_root:",
+        "            raise ValueError('Mailbox storage path is outside its domain.')",
+        "        shutil.rmtree(resolved_account_path)",
+        "    result = (1, 'None')",
+        "if d['operation'] in ('create', 'change_password') and result and result[0] == 1:",
+        "    account = EUsers.objects.filter(email=d['email']).first()",
+        "    if not account or not bcrypt.checkpw(d['password'].encode(), account.password.removeprefix('{CRYPT}').encode()):",
+        "        result = (0, 'The mailbox password could not be verified.')",
+        "print(json.dumps({'ok': bool(result and result[0] == 1), 'already_exists': already_exists, 'message': str(result[1]) if result and len(result) > 1 else ''}))",
     ))
     env = os.environ.copy()
     env["DJANGO_SETTINGS_MODULE"] = "CyberCP.settings"
@@ -187,14 +439,16 @@ def run_local_mail_operation(*, operation, domain, local_part, password=None):
         completed = subprocess.run(
             ["/usr/local/CyberCP/bin/python", "-c", script],
             input=json.dumps(payload), capture_output=True, text=True,
-            timeout=60, check=True, env=env,
+            timeout=60, check=True, cwd="/usr/local/CyberCP", env=env,
         )
         result = json.loads(completed.stdout.splitlines()[-1])
     except (OSError, subprocess.SubprocessError, ValueError, IndexError) as error:
-        raise CyberPanelError("CyberPanel mailbox operation failed.") from error
+        raise CyberPanelError("The mail server could not complete this mailbox change.") from error
     if not result.get("ok"):
         message = str(result.get("message") or "CyberPanel did not confirm the operation.")[:240]
         message = message.replace(payload["email"], "the mailbox")
         if password:
             message = message.replace(password, "[hidden]")
         raise CyberPanelError(f"CyberPanel could not complete this mailbox change: {message}")
+    if operation == "create":
+        return result

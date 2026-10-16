@@ -1,0 +1,27 @@
+{% extends "baseTemplate/index.html" %}
+{% load i18n %}
+{% block title %}{% trans "Add a website - TechInn" %}{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div id="page-title">
+        <h2>{% trans "Create a subdomain website" %}</h2>
+        <p>{% trans "Your main website and hosting plan are set up when you purchase hosting. Use TechInn to create additional subdomain websites under that hosting account." %}</p>
+    </div>
+
+    <div class="panel col-md-12">
+        <div class="panel-body">
+            <h3>{% if domain %}{% trans "Add a subdomain under" %} {{ domain }}{% else %}{% trans "Your hosting services" %}{% endif %}</h3>
+            <p>{% trans "Subdomains are created from your hosting account in TechInn, where the account’s website allowance and storage can be checked before setup." %}</p>
+            <p style="display:flex;flex-wrap:wrap;gap:12px;margin-top:24px">
+                {% if domain %}
+                <a href="{{ techinn_origin }}/dashboard/web/?create_subdomain_for={{ domain|urlencode }}" class="btn btn-primary">{% trans "Create a subdomain" %}</a>
+                <a href="{{ techinn_origin }}/dashboard/web/?create_subdomain_for={{ domain|urlencode }}" class="btn btn-default">{% trans "Return to hosting" %}</a>
+                {% else %}
+                <a href="{{ techinn_origin }}/dashboard/web/" class="btn btn-primary">{% trans "Open hosting to create a subdomain" %}</a>
+                {% endif %}
+            </p>
+        </div>
+    </div>
+</div>
+{% endblock %}

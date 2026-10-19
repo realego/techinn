@@ -1,0 +1,3 @@
+#!/bin/sh
+nginx -t && systemctl reload nginx
+systemctl reload lsws

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check TechInn service billing periods every five minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=techinn-my-expired-services.service
+
+[Install]
+WantedBy=timers.target

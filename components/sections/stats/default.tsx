@@ -1,5 +1,3 @@
-import { siteConfig } from "@/config/site";
-
 import { Section } from "../../ui/section";
 
 interface StatItemProps {
@@ -14,33 +12,11 @@ interface StatsProps {
   className?: string;
 }
 
-function formatToThousands(value: number) {
-  return Math.round(value / 100) / 10;
-}
-
 const DEFAULT_STATS: StatItemProps[] = [
-  {
-    label: "used by",
-    value: formatToThousands(siteConfig.stats.figma),
-    suffix: "k",
-    description: "designers on Figma Community",
-  },
-  {
-    label: "over",
-    value: siteConfig.stats.github,
-    description: "clones and forks of the template on GitHub",
-  },
-  {
-    label: "already",
-    value: formatToThousands(siteConfig.stats.cli),
-    suffix: "k",
-    description: "installations with shadcn/ui CLI",
-  },
-  {
-    label: "includes",
-    value: siteConfig.stats.sections,
-    description: "blocks and sections",
-  },
+  { label: "from", value: "$2", description: ".co.zw domain registration" },
+  { label: "from", value: "$3.50", description: "monthly web hosting" },
+  { label: "starts at", value: "$18.95", description: "annual business email" },
+  { label: "available", value: "24/7", description: "dashboard access and support" },
 ];
 
 export default function Stats({

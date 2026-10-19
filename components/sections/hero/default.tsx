@@ -1,4 +1,3 @@
-import { ArrowRightIcon } from "lucide-react";
 import { ReactNode } from "react";
 
 import { siteConfig } from "@/config/site";
@@ -6,6 +5,7 @@ import { cn } from "@/lib/utils";
 
 import Github from "../../logos/github";
 import { Badge } from "../../ui/badge";
+import { DemoStartLink } from "../../ui/demo-start-link";
 import Glow from "../../ui/glow";
 import { LinkButton, type LinkButtonProps } from "../../ui/link-button";
 import { Mockup, MockupFrame } from "../../ui/mockup";
@@ -17,7 +17,7 @@ interface HeroButtonProps extends Omit<LinkButtonProps, "children"> {
 }
 
 interface HeroProps {
-  title?: string;
+  title?: ReactNode;
   description?: string;
   mockup?: ReactNode | false;
   badge?: ReactNode | false;
@@ -44,20 +44,17 @@ const DEFAULT_HERO_BADGE = (
     <span className="text-muted-foreground">
       New version of Launch UI is out!
     </span>
-    <a href={siteConfig.getStartedUrl} className="flex items-center gap-1">
-      Get started
-      <ArrowRightIcon className="size-3" />
-    </a>
+    <DemoStartLink />
   </Badge>
 );
 
 const DEFAULT_HERO_MOCKUP = (
   <Screenshot
-    srcLight="/dashboard-light.png"
-    srcDark="/dashboard-dark.png"
-    alt="Launch UI app screenshot"
-    width={1248}
-    height={765}
+    srcLight="/dashboard-light.jpeg"
+    srcDark="/dashboard-dark.jpeg"
+    alt="Website project dashboard preview"
+    width={1600}
+    height={741}
     loading="eager"
     className="w-full"
   />

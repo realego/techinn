@@ -2,6 +2,27 @@
 
 A comprehensive collection of production-ready website components built with Next.js, Shadcn/ui, and Tailwind CSS. Perfect for developers looking to quickly build modern, responsive websites with the power of shadcn/ui components.
 
+## TechInn customer portal
+
+This checkout contains the TechInn Hosting storefront and customer portal built
+from Launch UI and shadcn/ui components. It includes domains, hosting, business
+email, checkout, billing, customer services, consent-controlled Meta Pixel
+measurement, source attribution, and the Django API in `backend/`.
+
+The backend includes reusable Cloudflare and CyberPanel provider adapters,
+hosting and mailbox provisioning workers, DNS management, file-manager and
+panel sessions, and a safe CyberPanel helper installer. Start with
+[`backend/README.md`](backend/README.md), [`backend/.env.example`](backend/.env.example),
+and [`backend/deploy/cyberpanel/`](backend/deploy/cyberpanel/). Provider secrets
+are intentionally excluded from Git; configure them through environment
+variables or the Django admin on the server.
+
+For a frontend-only deployment, use the existing static export workflow. For a
+full hosting deployment, run the Django API and workers, configure the
+CyberPanel variables, install the root-owned helper as documented, and keep
+provider API keys server-side. The frontend never receives CyberPanel,
+Cloudflare, registrar, or payment credentials.
+
 [![Next.js](https://img.shields.io/badge/Next.js-16-black)](https://nextjs.org/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4.2-blue)](https://tailwindcss.com/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue)](https://www.typescriptlang.org/)

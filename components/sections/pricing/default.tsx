@@ -1,117 +1,86 @@
-import { User, Users } from "lucide-react";
+"use client";
 
-import { siteConfig } from "@/config/site";
+import { BriefcaseBusiness, Mail, Rocket, Server, UserRound, UsersRound } from "lucide-react";
+import { type ReactNode, useState } from "react";
+
+import { emailHostingPlans, type HostingService,planSelectionHref, webHostingPlans } from "@/config/hosting-plans";
 import { cn } from "@/lib/utils";
 
-import { PricingColumn, PricingColumnProps } from "../../ui/pricing-column";
+import { Button } from "../../ui/button";
+import { PricingColumn } from "../../ui/pricing-column";
 import { Section } from "../../ui/section";
 
 interface PricingProps {
-  title?: string | false;
-  description?: string | false;
-  plans?: PricingColumnProps[] | false;
+  service?: HostingService;
+  title?: ReactNode;
+  description?: string;
   className?: string;
 }
 
-const DEFAULT_PRICING_PLANS: PricingColumnProps[] = [
-  {
-    name: "Free",
-    description: "For everyone starting out on a website for their big idea",
-    price: 0,
-    priceNote: "Free and open-source forever. Get started now.",
-    cta: {
-      variant: "glow",
-      label: "Get started for free",
-      href: siteConfig.getStartedUrl,
-    },
-    features: [
-      "1 website template",
-      "9 blocks and sections",
-      "4 custom animations",
-    ],
-    variant: "default",
-    className: "hidden lg:flex",
-  },
-  {
-    name: "Pro",
-    icon: <User className="size-4" />,
-    description: "For early-stage founders, solopreneurs and indie devs",
-    price: 99,
-    priceNote: "Lifetime access. Free updates. No recurring fees.",
-    cta: {
-      variant: "default",
-      label: "Get all-access",
-      href: siteConfig.pricing.pro,
-    },
-    features: [
-      `${siteConfig.stats.templates} templates`,
-      `${siteConfig.stats.sections} blocks and sections`,
-      `${siteConfig.stats.illustrations} illustrations`,
-      `${siteConfig.stats.animations} custom animations`,
-    ],
-    variant: "glow-brand",
-  },
-  {
-    name: "Pro Team",
-    icon: <Users className="size-4" />,
-    description: "For teams and agencies working on cool products together",
-    price: 499,
-    priceNote: "Lifetime access. Free updates. No recurring fees.",
-    cta: {
-      variant: "default",
-      label: "Get all-access for your team",
-      href: siteConfig.pricing.team,
-    },
-    features: [
-      "All the templates, components and sections available for your entire team",
-    ],
-    variant: "glow",
-  },
+const webIcons = [
+  <Server key="basic" className="size-4" />,
+  <Rocket key="growth" className="size-4" />,
+  <BriefcaseBusiness key="business" className="size-4" />,
+];
+const emailIcons = [
+  <Mail key="essential" className="size-4" />,
+  <UsersRound key="team" className="size-4" />,
+  <UserRound key="business-mail" className="size-4" />,
 ];
 
 export default function Pricing({
-  title = "Build your dream landing page, today.",
-  description = "Get lifetime access to all the components. No recurring fees. Just simple, transparent pricing.",
-  plans = DEFAULT_PRICING_PLANS,
-  className = "",
+  service = "web",
+  title = service === "web"
+    ? <>Hosting plans for <span className="text-orange-600 dark:text-orange-400">every next step.</span></>
+    : <><span className="text-orange-600 dark:text-orange-400">Professional email</span> for every team.</>,
+  description = service === "web"
+    ? "Start with 2 GB of storage and unlimited email accounts, then grow when your website does."
+    : "Use your domain for business email and pick the mailbox space that suits your work.",
+  className,
 }: PricingProps) {
+  const [billing, setBilling] = useState<"monthly" | "yearly">(service === "email" ? "yearly" : "monthly");
+  const plans = service === "web" ? webHostingPlans : emailHostingPlans;
+  const icons = service === "web" ? webIcons : emailIcons;
+  const priceUnit = service === "email" ? "per year" : "per month";
+
   return (
-    <Section className={cn(className)}>
-      <div className="mx-auto flex max-w-6xl flex-col items-center gap-12">
-        {(title || description) && (
-          <div className="flex flex-col items-center gap-4 px-4 text-center sm:gap-8">
-            {title && (
-              <h2 className="text-3xl leading-tight font-semibold sm:text-5xl sm:leading-tight">
-                {title}
-              </h2>
-            )}
-            {description && (
-              <p className="text-md text-muted-foreground max-w-[600px] font-medium sm:text-xl">
-                {description}
-              </p>
-            )}
-          </div>
-        )}
-        {plans !== false && plans.length > 0 && (
-          <div className="max-w-container mx-auto grid grid-cols-1 gap-8 sm:grid-cols-2 lg:grid-cols-3">
-            {plans.map((plan) => (
+    <Section id={service === "web" ? "web-plans" : "email-plans"} className={cn("scroll-mt-24", className)}>
+      <div className="mx-auto flex max-w-6xl flex-col items-center gap-10 sm:gap-12">
+        <div className="flex flex-col items-center gap-4 px-4 text-center sm:gap-6">
+          <h2 className="text-3xl leading-tight font-semibold sm:text-5xl sm:leading-tight">{title}</h2>
+          <p className="text-md text-muted-foreground max-w-[640px] font-medium sm:text-xl">{description}</p>
+          {service === "web" && <div className="bg-muted/60 mt-2 flex items-center gap-1 rounded-full border p-1" aria-label="Billing period">
+            <Button size="sm" variant={billing === "monthly" ? "default" : "ghost"} aria-pressed={billing === "monthly"} onClick={() => setBilling("monthly")}>Monthly</Button>
+            <Button size="sm" variant={billing === "yearly" ? "default" : "ghost"} aria-pressed={billing === "yearly"} onClick={() => setBilling("yearly")}>Yearly <span className="ml-1 text-xs">Save 10%</span></Button>
+          </div>}
+        </div>
+        <div className="max-w-container mx-auto grid w-full grid-cols-1 gap-8 md:grid-cols-3">
+          {plans.map((plan, index) => {
+            const shownPrice = billing === "yearly" && service === "web" ? plan.price * 0.9 : plan.price;
+            const annualTotal = service === "email" ? plan.price : plan.price * 12 * 0.9;
+            return (
               <PricingColumn
-                key={plan.name}
+                key={plan.id}
                 name={plan.name}
-                icon={plan.icon}
+                icon={icons[index]}
                 description={plan.description}
-                price={plan.price}
-                originalPrice={plan.originalPrice}
-                promotionText={plan.promotionText}
-                priceNote={plan.priceNote}
-                cta={plan.cta}
+                price={shownPrice}
+                priceUnit={priceUnit}
+                priceNote={billing === "yearly"
+                  ? "Billed $" + annualTotal.toFixed(2) + " yearly" + (service === "email" ? ". Annual plan only." : ". Save 10%.")
+                  : "Billed $" + plan.price.toFixed(2) + " monthly" + (service === "email" ? " per mailbox" : "") + "."}
+                cta={{
+                  variant: plan.variant === "default" ? "glow" : "default",
+                  label: "Choose " + plan.name,
+                  href: planSelectionHref(service, plan.id, billing),
+                }}
                 features={plan.features}
                 variant={plan.variant}
-                className={plan.className}
               />
-            ))}
-          </div>
-        )}
+            );
+          })}
+        </div>
+        <p className="text-muted-foreground text-center text-xs">Prices are shown in USD. The selected plan, billing period, and included features are confirmed at checkout.</p>
       </div>
     </Section>
   );

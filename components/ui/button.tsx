@@ -1,11 +1,12 @@
-import { Slot } from "@radix-ui/react-slot";
+import { Slot, Slottable } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
+import { LoaderCircle } from "lucide-react";
 import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-[color,background-color,border-color,box-shadow,transform,opacity] duration-200 ease-out active:scale-[0.98] motion-reduce:transition-none focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
   {
     variants: {
       variant: {
@@ -41,19 +42,41 @@ function Button({
   variant,
   size,
   asChild = false,
+  loading = false,
+  disabled,
+  children,
   ...props
 }: React.ComponentProps<"button"> &
   VariantProps<typeof buttonVariants> & {
     asChild?: boolean;
+    loading?: boolean;
   }) {
-  const Comp = asChild ? Slot : "button";
+  const buttonProps = {
+    "data-slot": "button",
+    "aria-busy": loading || undefined,
+    disabled: loading || disabled,
+    className: cn(buttonVariants({ variant, size, className })),
+    ...props,
+  };
+
+  if (asChild && loading) {
+    return (
+      <Slot {...buttonProps}>
+        <LoaderCircle aria-hidden="true" className="animate-spin" />
+        <Slottable>{children}</Slottable>
+      </Slot>
+    );
+  }
+
+  if (asChild) {
+    return <Slot {...buttonProps}>{children}</Slot>;
+  }
 
   return (
-    <Comp
-      data-slot="button"
-      className={cn(buttonVariants({ variant, size, className }))}
-      {...props}
-    />
+    <button {...buttonProps}>
+      {loading && <LoaderCircle aria-hidden="true" className="animate-spin" />}
+      {children}
+    </button>
   );
 }
 

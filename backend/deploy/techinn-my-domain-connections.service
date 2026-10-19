@@ -1,0 +1,12 @@
+[Unit]
+Description=Verify existing domains and connect TechInn hosting and DNS
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/home/my.techinn.co.zw/launch-ui/backend
+EnvironmentFile=/home/my.techinn.co.zw/launch-ui/backend/.env
+ExecStart=/home/my.techinn.co.zw/launch-ui/backend/.venv/bin/python manage.py process_domain_connections --limit 1
+TimeoutStartSec=20min

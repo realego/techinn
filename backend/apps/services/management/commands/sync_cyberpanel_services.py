@@ -1,0 +1,232 @@
+import json
+import os
+import subprocess
+from decimal import Decimal
+
+from django.contrib.auth import get_user_model
+from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
+from django.utils import timezone
+
+from apps.catalog.models import Product
+from apps.services.models import (
+    CustomerService,
+    DomainAsset,
+    HostingAccount,
+    HostingResource,
+    HostingStorageAddon,
+    HostingWebsite,
+    Mailbox,
+)
+from apps.services.providers.cyberpanel import CyberPanelError, run_local_mail_quota_operation
+from apps.services.storage import set_shared_hosting_disk_quota
+
+
+PANEL_READ_SCRIPT = r"""
+import os,sys,json
+sys.path.insert(0,'/usr/local/CyberCP')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE','CyberCP.settings')
+import django; django.setup()
+from loginSystem.models import Administrator
+from websiteFunctions.models import Websites
+from mailServer.models import EUsers
+from plogical.virtualHostUtilities import virtualHostUtilities
+for admin in Administrator.objects.exclude(userName='admin').filter(state='ACTIVE'):
+    for site in Websites.objects.filter(admin=admin,state=1):
+        try:
+            disk_used_mb = virtualHostUtilities.FindStats(site)[0]
+        except Exception:
+            disk_used_mb = 0
+        package = site.package
+        domain_names = [site.domain] + list(site.childdomains_set.values_list('domain', flat=True))
+        mailboxes = [{'email': email.email, 'used_mb': email.DiskUsage} for email in
+            EUsers.objects.filter(emailOwner__domain__in=domain_names)]
+        print(json.dumps({'email':admin.email,'username':admin.userName,'linux_username':site.externalApp,'domain':site.domain,
+            'package_name':package.packageName,'disk_limit_mb':package.diskSpace,
+            'disk_used_mb':disk_used_mb,'allowed_domains':package.allowedDomains,
+            'email_limit':package.emailAccounts,
+            'mailboxes':mailboxes}))
+"""
+
+
+def sync_storage_resource(account, record):
+    try:
+        limit_mb = max(1, int(record["disk_limit_mb"]))
+        used_mb = max(0, int(float(record.get("disk_used_mb", 0))))
+    except (KeyError, TypeError, ValueError):
+        return
+    HostingResource.objects.update_or_create(
+        hosting_account=account,
+        resource_type=HostingResource.ResourceType.DISK,
+        defaults={
+            "limit_value": Decimal(limit_mb) / Decimal(1024) + sum(
+                HostingStorageAddon.objects.filter(
+                    customer_service=account.customer_service,
+                    status=HostingStorageAddon.Status.ACTIVE,
+                ).values_list("storage_gb", flat=True)
+            ),
+            "used_value": Decimal(used_mb) / Decimal(1024),
+            "unit": "GB",
+            "measured_at": timezone.now(),
+        },
+    )
+
+
+def sync_mailboxes(account, domain, records, email_limit):
+    failed_quotas = []
+    for mailbox_record in records:
+        try:
+            address = mailbox_record["email"].strip().lower()
+            local_part, mailbox_domain = address.rsplit("@", 1)
+            if mailbox_domain == domain.domain_name.lower():
+                email_domain = ""
+            elif HostingWebsite.objects.filter(
+                domain_name=mailbox_domain,
+                master_domain=domain.domain_name,
+                status=HostingWebsite.Status.ACTIVE,
+                hosting_account__customer_service__customer=domain.customer_service.customer,
+            ).exists():
+                email_domain = mailbox_domain
+            else:
+                continue
+            used_mb = max(0, int(float(mailbox_record.get("used_mb", 0))))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        mailbox, created = Mailbox.objects.get_or_create(
+            domain=domain,
+            email_domain=email_domain,
+            local_part=local_part,
+            defaults={
+                "hosting_account": account,
+                "quota_mb": max(1, used_mb),
+                "used_mb": used_mb,
+                "external_mailbox_id": address,
+                "status": Mailbox.Status.ACTIVE,
+            },
+        )
+        updated_fields = []
+        if mailbox.hosting_account_id != account.id:
+            mailbox.hosting_account = account
+            updated_fields.append("hosting_account")
+        if mailbox.used_mb != used_mb:
+            mailbox.used_mb = used_mb
+            updated_fields.append("used_mb")
+        if mailbox.external_mailbox_id != address:
+            mailbox.external_mailbox_id = address
+            updated_fields.append("external_mailbox_id")
+        if mailbox.status not in (Mailbox.Status.ACTIVE, Mailbox.Status.CLEARING):
+            mailbox.status = Mailbox.Status.ACTIVE
+            updated_fields.append("status")
+        if updated_fields:
+            mailbox.save(update_fields=(*updated_fields, "updated_at"))
+        try:
+            run_local_mail_quota_operation(
+                operation="set",
+                domain=mailbox.effective_domain,
+                local_part=mailbox.local_part,
+                quota_mb=mailbox.quota_mb,
+            )
+        except CyberPanelError as error:
+            mailbox.last_error = str(error)
+            mailbox.save(update_fields=("last_error", "updated_at"))
+            failed_quotas.append(f"{mailbox.email_address}: {error}")
+        else:
+            if mailbox.last_error:
+                mailbox.last_error = ""
+                mailbox.save(update_fields=("last_error", "updated_at"))
+    try:
+        limit = max(1, int(email_limit or 1000))
+    except (TypeError, ValueError):
+        limit = 1000
+    used = Mailbox.objects.filter(hosting_account=account).exclude(
+        status__in=(Mailbox.Status.DELETED, Mailbox.Status.DELETING)
+    ).count()
+    HostingResource.objects.update_or_create(
+        hosting_account=account,
+        resource_type=HostingResource.ResourceType.EMAIL_ACCOUNTS,
+        defaults={"limit_value": Decimal(limit), "used_value": Decimal(used), "unit": "mailboxes"},
+    )
+    try:
+        set_shared_hosting_disk_quota(account)
+    except CyberPanelError as error:
+        failed_quotas.append(f"{domain.domain_name} filesystem quota: {error}")
+    if failed_quotas:
+        raise CommandError("Could not apply storage limits: " + "; ".join(failed_quotas[:5]))
+
+
+class Command(BaseCommand):
+    help = "Import active CyberPanel websites that match an existing TechInn customer email."
+
+    def handle(self, *args, **options):
+        env = os.environ.copy()
+        env.pop("DJANGO_SETTINGS_MODULE", None)
+        try:
+            result = subprocess.run(
+                ["/usr/local/CyberCP/bin/python", "-c", PANEL_READ_SCRIPT],
+                check=True, capture_output=True, text=True, timeout=60, env=env,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise CommandError("Could not read active websites from CyberPanel.") from error
+
+        product = Product.objects.filter(slug="web-basic").first()
+        if product is None:
+            raise CommandError("The web-basic hosting product has not been seeded.")
+        User = get_user_model()
+        imported = skipped = 0
+        for line in result.stdout.splitlines():
+            try:
+                record = json.loads(line)
+                email = record["email"].strip().lower()
+                domain_name = record["domain"].strip().rstrip(".").lower()
+                username = record["username"].strip()
+                linux_username = record["linux_username"].strip()
+            except (json.JSONDecodeError, KeyError, AttributeError):
+                continue
+            user = User.objects.filter(email__iexact=email).first()
+            if not user or not domain_name or not username or not linux_username:
+                skipped += 1
+                continue
+            existing_domain = DomainAsset.objects.filter(domain_name__iexact=domain_name).first()
+            if existing_domain and existing_domain.customer_service.customer_id != user.id:
+                skipped += 1
+                continue
+            existing_account = HostingAccount.objects.filter(external_account_id=domain_name).first()
+            if existing_account:
+                if existing_account.customer_service.customer_id == user.id:
+                    existing_account.username = username
+                    existing_account.linux_username = linux_username
+                    existing_account.status = HostingAccount.Status.ACTIVE
+                    existing_account.save(update_fields=("username", "linux_username", "status", "updated_at"))
+                    sync_storage_resource(existing_account, record)
+                    if existing_domain:
+                        sync_mailboxes(existing_account, existing_domain, record.get("mailboxes", []), record.get("email_limit"))
+                    skipped += 1
+                    continue
+                skipped += 1
+                continue
+            with transaction.atomic():
+                service = CustomerService.objects.create(
+                    customer=user,
+                    product=product,
+                    status=CustomerService.Status.ACTIVE,
+                    provisioning_data={"cyberpanel": {"status": "active", "imported": True}},
+                )
+                domain = existing_domain or DomainAsset.objects.create(
+                    customer_service=service,
+                    domain_name=domain_name,
+                    registrar="CyberPanel (existing service)",
+                    status=DomainAsset.Status.ACTIVE,
+                )
+                account = HostingAccount.objects.create(
+                    customer_service=service,
+                    server_name="CyberPanel",
+                    external_account_id=domain_name,
+                    username=username,
+                    linux_username=linux_username,
+                    primary_domain=domain,
+                    status=HostingAccount.Status.ACTIVE,
+                )
+                sync_storage_resource(account, record)
+                sync_mailboxes(account, domain, record.get("mailboxes", []), record.get("email_limit"))
+            imported += 1
+        self.stdout.write(f"Imported {imported} active hosting service(s); skipped {skipped} unmatched or duplicate site(s).")

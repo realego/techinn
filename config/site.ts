@@ -1,11 +1,10 @@
 export const siteConfig = {
-  name: "Launch UI",
-  url: "https://launchuicomponents.com",
-  getStartedUrl:
-    "https://launchuicomponents.com/docs/getting-started/introduction",
-  ogImage: "https://launchuicomponents.com/og.jpg",
+  name: "TechInn",
+  url: "https://my.techinn.co.zw",
+  getStartedUrl: "https://my.techinn.co.zw/how-to/",
+  ogImage: "https://my.techinn.co.zw/techinn-logo.png",
   description:
-    "Landing page components built with React, Shadcn/ui and Tailwind that will make your website feel premium.",
+    "Find .co.zw domains, affordable web hosting, professional business email, and small-business website design from TechInn in Zimbabwe.",
   version: "v2.10.1",
   links: {
     twitter: "https://twitter.com/mikolajdobrucki",

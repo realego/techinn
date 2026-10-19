@@ -27,49 +27,49 @@ interface ItemsProps {
 
 const DEFAULT_ITEMS: ItemProps[] = [
   {
-    title: "Accessibility first",
-    description: "Fully WCAG 2.0 compliant, made with best a11y practices",
+    title: "Domains",
+    description: "Search and register .co.zw, .org.zw, .ac.zw, .com, .net, and .org domains.",
     icon: <ScanFaceIcon className="size-5 stroke-1" />,
   },
   {
-    title: "Responsive design",
-    description: "Looks and works great on any device and screen size",
+    title: "Web hosting",
+    description: "Managed hosting, storage, SSL, file manager access, and website previews.",
     icon: <MonitorSmartphoneIcon className="size-5 stroke-1" />,
   },
   {
-    title: "Light and dark mode",
-    description: "Seamless switching between color schemes, 6 themes included",
+    title: "Business email",
+    description: "Professional mailboxes on your domain with quotas and webmail access.",
     icon: <EclipseIcon className="size-5 stroke-1" />,
   },
   {
-    title: "Easy to customize",
-    description: "Flexible options to match your product or brand",
+    title: "DNS management",
+    description: "Review, add, edit, and remove DNS records from your dashboard.",
     icon: <BlocksIcon className="size-5 stroke-1" />,
   },
   {
-    title: "Top-level performance",
-    description: "Made for lightning-fast load times and smooth interactions",
+    title: "Secure billing",
+    description: "Track invoices, deposits, service periods, and separate renewals.",
     icon: <FastForwardIcon className="size-5 stroke-1" />,
   },
   {
-    title: "Production ready",
-    description: "Thoroughly tested and launch-prepared",
+    title: "Service support",
+    description: "Follow provisioning status and get clear next steps when a service needs attention.",
     icon: <RocketIcon className="size-5 stroke-1" />,
   },
   {
-    title: "Made for localization",
-    description: "Easy to implement support for multiple languages and regions",
+    title: "Website design",
+    description: "Start with a small-business website and add booking, shopping, or other features.",
     icon: <LanguagesIcon className="size-5 stroke-1" />,
   },
   {
-    title: "CMS friendly",
-    description: "Built to work with any headless content management system",
+    title: "Account control",
+    description: "Manage your profile, passwords, OTP resets, team access, and notifications.",
     icon: <SquarePenIcon className="size-5 stroke-1" />,
   },
 ];
 
 export default function Items({
-  title = "Everything you need. Nothing you don't.",
+  title = "Everything your business needs to get online.",
   items = DEFAULT_ITEMS,
   className,
 }: ItemsProps) {

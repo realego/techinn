@@ -1,8 +1,13 @@
+"use client";
+
 import { cva, type VariantProps } from "class-variance-authority";
 import { CircleCheckBig } from "lucide-react";
 import Link from "next/link";
 import { ReactNode } from "react";
 
+import { siteConfig } from "@/config/site";
+import { useDemoSignedIn } from "@/lib/demo-auth";
+import { useSignInHref } from "@/lib/auth-redirect";
 import { cn } from "@/lib/utils";
 
 import { Button } from "./button";
@@ -32,6 +37,7 @@ export interface PricingColumnProps
   icon?: ReactNode;
   description: string;
   price: number;
+  priceUnit?: string;
   originalPrice?: number;
   promotionText?: ReactNode;
   priceNote: string;
@@ -48,6 +54,7 @@ export function PricingColumn({
   icon,
   description,
   price,
+  priceUnit = "per month",
   originalPrice,
   promotionText,
   priceNote,
@@ -57,6 +64,9 @@ export function PricingColumn({
   className,
   ...props
 }: PricingColumnProps) {
+  const signedIn = useDemoSignedIn();
+  const signInHref = useSignInHref();
+  const isGetStarted = cta.href === siteConfig.getStartedUrl;
   return (
     <div
       className={cn(pricingColumnVariants({ variant, className }))}
@@ -98,16 +108,14 @@ export function PricingColumn({
                 <span className="text-muted-foreground text-2xl font-bold">
                   $
                 </span>
-                <span className="text-6xl font-bold">{price}</span>
+                <span className="text-6xl font-bold">{price.toFixed(2)}</span>
               </div>
             </div>
             <div className="flex min-h-[40px] flex-col">
               {price > 0 && (
                 <>
-                  <span className="text-sm">one-time payment</span>
-                  <span className="text-muted-foreground text-sm">
-                    plus local taxes
-                  </span>
+                  <span className="text-sm">{priceUnit}</span>
+                  <span className="text-muted-foreground text-sm">USD</span>
                 </>
               )}
             </div>
@@ -119,7 +127,9 @@ export function PricingColumn({
           )}
         </section>
         <Button variant={cta.variant} size="lg" asChild>
-          <Link href={cta.href}>{cta.label}</Link>
+          <Link href={isGetStarted ? signedIn ? "/dashboard/" : signInHref : cta.href}>
+            {isGetStarted && signedIn ? "Dashboard" : cta.label}
+          </Link>
         </Button>
         <p className="text-muted-foreground min-h-[40px] max-w-[220px] text-sm">
           {priceNote}

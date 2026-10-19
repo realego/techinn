@@ -1,5 +1,11 @@
+"use client";
+
 import { type VariantProps } from "class-variance-authority";
 import { type ComponentProps, type ReactNode } from "react";
+
+import { siteConfig } from "@/config/site";
+import { useDemoSignedIn } from "@/lib/demo-auth";
+import { useSignInHref } from "@/lib/auth-redirect";
 
 import { Button, buttonVariants } from "./button";
 
@@ -20,11 +26,17 @@ export function LinkButton({
   iconRight,
   size = "lg",
 }: LinkButtonProps) {
+  const signedIn = useDemoSignedIn();
+  const signInHref = useSignInHref();
+  const isGetStarted = href === siteConfig.getStartedUrl;
+  const destination = isGetStarted
+    ? signedIn ? "/dashboard/" : signInHref
+    : href;
   return (
     <Button variant={variant} size={size} asChild>
-      <a href={href}>
+      <a href={destination}>
         {icon}
-        {children}
+        {isGetStarted && signedIn ? "Dashboard" : children}
         {iconRight}
       </a>
     </Button>

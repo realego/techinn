@@ -5,7 +5,7 @@ import unusedImports from "eslint-plugin-unused-imports";
 const eslintConfig = [
   ...nextConfig,
   {
-    ignores: [".next/", ".vercel/", "node_modules/"],
+    ignores: [".next/", ".vercel/", "node_modules/", "backend/.venv/"],
   },
   {
     plugins: {

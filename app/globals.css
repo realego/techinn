@@ -3,6 +3,14 @@
 
 @import "tw-animate-css";
 
+@media (max-width: 639px) {
+  .customer-dashboard [data-slot="card"] { min-width: 0; gap: 1rem; }
+  .customer-dashboard [data-slot="card-header"],
+  .customer-dashboard [data-slot="card-content"],
+  .customer-dashboard [data-slot="card-footer"] { padding-inline: .75rem; min-width: 0; }
+  .customer-dashboard input, .customer-dashboard select { min-width: 0; }
+}
+
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
@@ -219,5 +227,144 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+}
+
+.shop-service-row {
+  --shop-accent: #f59e0b;
+  --shop-accent-ink: #92400e;
+  position: relative;
+  box-shadow: inset 3px 0 var(--shop-accent);
+}
+.shop-service-row[data-service="hosting"] { --shop-accent: #38bdf8; --shop-accent-ink: #0369a1; }
+.shop-service-row[data-service="email"] { --shop-accent: #a78bfa; --shop-accent-ink: #6d28d9; }
+.shop-service-row[data-service="domain"] { --shop-accent: #34d399; --shop-accent-ink: #047857; }
+.shop-service-row[data-service="app"] { --shop-accent: #fb7185; --shop-accent-ink: #be123c; }
+.dark .shop-service-row { --shop-accent-ink: #fcd34d; }
+.dark .shop-service-row[data-service="hosting"] { --shop-accent-ink: #7dd3fc; }
+.dark .shop-service-row[data-service="email"] { --shop-accent-ink: #c4b5fd; }
+.dark .shop-service-row[data-service="domain"] { --shop-accent-ink: #6ee7b7; }
+.dark .shop-service-row[data-service="chatbot"] { --shop-accent-ink: #c4b5fd; }
+.dark .shop-service-row[data-service="app"] { --shop-accent-ink: #fda4af; }
+.shop-service-identity {
+  background: var(--background);
+}
+.shop-service-art {
+  height: 220px;
+  background-color: #edf2fb;
+  background-image: var(--shop-image);
+  background-position: center 35%;
+  background-size: cover;
+  background-repeat: no-repeat;
+  border-radius: 8px 8px 0 0;
+}
+.shop-service-art::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, transparent 48%, color-mix(in oklab, var(--background) 45%, transparent) 72%, var(--background) 100%);
+}
+.shop-service-copy { padding: 198px 12px 8px; }
+.shop-service-row[data-service="hosting"] .shop-service-art {
+  background-size: auto 96%;
+  background-position: center top;
+}
+.shop-service-row[data-service="app"] .shop-service-art { background-position: center 45%; }
+.shop-service-row[data-service="chatbot"] .shop-service-art { background-position: center 40%; }
+@media (max-width: 639px) {
+  .shop-service-art { height: 190px; }
+  .shop-service-copy { padding: 174px 4px 4px; }
+}
+.shop-service-icon {
+  color: var(--shop-accent-ink);
+  background: linear-gradient(145deg, color-mix(in oklab, var(--shop-accent) 24%, var(--background)), color-mix(in oklab, var(--shop-accent) 6%, var(--background)));
+  border: 1px solid color-mix(in oklab, var(--shop-accent) 45%, transparent);
+}
+.shop-service-category { color: var(--shop-accent-ink); }
+.shop-service-watermark { color: color-mix(in oklab, var(--shop-accent) 13%, transparent); }
+.shop-service-feature {
+  color: var(--shop-accent-ink);
+  background: color-mix(in oklab, var(--shop-accent) 10%, transparent);
+}
+.shop-addon-frame {
+  padding: 1px;
+  border-radius: 8px;
+  background-image: linear-gradient(110deg,
+    color-mix(in oklab, var(--shop-accent) 45%, var(--background)) 5%,
+    color-mix(in oklab, var(--shop-accent) 45%, var(--background)) 30%,
+    var(--shop-accent) 50%,
+    color-mix(in oklab, var(--shop-accent) 45%, var(--background)) 70%);
+  background-size: 220% 100%;
+  animation: domain-outline-wave 9s linear infinite;
+  transition: box-shadow 180ms ease;
+}
+.shop-addon-frame:hover, .shop-addon-frame:focus-within {
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--shop-accent) 22%, transparent);
+}
+.shop-addon-frame > [data-slot="select-trigger"] {
+  width: 100%;
+  height: 40px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--background);
+  color: var(--foreground);
+}
+.shop-addon-frame > [data-slot="select-trigger"] > svg {
+  color: var(--shop-accent-ink);
+  opacity: 1;
+}
+.shop-addon-frame[data-selected="true"] > [data-slot="select-trigger"] {
+  background: color-mix(in oklab, var(--shop-accent) 8%, var(--background));
+}
+
+.cart-count-digit {
+  display: inline-block;
+  animation: cart-count-in 280ms ease-out;
+}
+
+@keyframes cart-count-in {
+  from { transform: translateY(5px) scale(0.75); opacity: 0; }
+  65% { transform: translateY(-1px) scale(1.08); opacity: 1; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+.domain-search-frame {
+  background-image: linear-gradient(
+    110deg,
+    transparent 5%,
+    color-mix(in oklab, var(--brand) 10%, transparent) 28%,
+    color-mix(in oklab, var(--brand) 48%, transparent) 50%,
+    transparent 72%
+  );
+  background-size: 220% 100%;
+  animation: domain-outline-wave 7s linear infinite;
+}
+
+@keyframes domain-outline-wave {
+  from {
+    background-position: 100% 50%;
+  }
+  to {
+    background-position: -120% 50%;
+  }
+}
+
+@keyframes domain-choice-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-6px); }
+  40%, 80% { transform: translateX(6px); }
+}
+
+.domain-choice-shake {
+  animation: domain-choice-shake 420ms ease-in-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shop-addon-frame { animation: none; transition: none; background-position: center; }
+  .cart-count-digit { animation: none; }
+  .domain-choice-shake { animation: none; }
+  .domain-search-frame {
+    animation: none;
+    background-position: center;
   }
 }

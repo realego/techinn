@@ -1,9 +1,10 @@
+import Link from "next/link";
 import { ReactNode } from "react";
 
-import { siteConfig } from "@/config/site";
 import { cn } from "@/lib/utils";
+import { CookieSettingsTrigger } from "@/components/cookie-settings-trigger";
 
-import LaunchUI from "../../logos/launch-ui";
+import { TechInnBrand } from "../../logos/techinn-brand";
 import {
   Footer,
   FooterBottom,
@@ -33,37 +34,41 @@ interface FooterProps {
 }
 
 export default function FooterSection({
-  logo = <LaunchUI />,
-  name = "Launch UI",
+  logo = <TechInnBrand className="w-28 sm:w-32" />,
+  name = "TechInn Hosting",
   columns = [
     {
       title: "Product",
       links: [
-        { text: "Changelog", href: siteConfig.url },
-        { text: "Documentation", href: siteConfig.url },
+        { text: "Domains", href: "/domains/" },
+        { text: "Web hosting", href: "/shop/?service=web" },
+        { text: "Business email", href: "/shop/?service=email" },
+        { text: "How to guides", href: "/how-to/" },
       ],
     },
     {
       title: "Company",
       links: [
-        { text: "About", href: siteConfig.url },
-        { text: "Careers", href: siteConfig.url },
-        { text: "Blog", href: siteConfig.url },
+        { text: "Shop all services", href: "/shop/" },
+        { text: "Customer dashboard", href: "/dashboard/" },
+        { text: "Contact TechInn", href: "mailto:support@my.techinn.co.zw" },
       ],
     },
     {
       title: "Contact",
       links: [
-        { text: "Discord", href: siteConfig.url },
-        { text: "Twitter", href: siteConfig.url },
-        { text: "GitHub", href: siteConfig.links.github },
+        { text: "Support email", href: "mailto:support@my.techinn.co.zw" },
+        { text: "WhatsApp", href: "https://wa.me/263717959400" },
+        { text: "Call 00263717959400", href: "tel:00263717959400" },
+        { text: "Billing help", href: "/how-to/billing-renewals/" },
+        { text: "Hosting help", href: "/how-to/hosting-file-manager/" },
       ],
     },
   ],
-  copyright = "© 2026 Mikołaj Dobrucki. All rights reserved",
+  copyright = "© 2026 TechInn. All rights reserved",
   policies = [
-    { text: "Privacy Policy", href: siteConfig.url },
-    { text: "Terms of Service", href: siteConfig.url },
+    { text: "Privacy Policy", href: "/privacy/" },
+    { text: "Terms of Service", href: "/terms/" },
   ],
   showModeToggle = true,
   className,
@@ -74,10 +79,9 @@ export default function FooterSection({
         <Footer>
           <FooterContent>
             <FooterColumn className="col-span-2 sm:col-span-3 md:col-span-1">
-              <div className="flex items-center gap-2">
+              <Link href="/" aria-label={name + " home"} className="inline-flex items-center gap-2">
                 {logo}
-                <h3 className="text-xl font-bold">{name}</h3>
-              </div>
+              </Link>
             </FooterColumn>
             {columns.map((column) => (
               <FooterColumn key={column.title}>
@@ -102,6 +106,7 @@ export default function FooterSection({
                   {policy.text}
                 </a>
               ))}
+              <CookieSettingsTrigger />
               {showModeToggle && <ModeToggle />}
             </div>
           </FooterBottom>

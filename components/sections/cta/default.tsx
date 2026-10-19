@@ -11,6 +11,7 @@ interface CTAButtonProps extends Omit<LinkButtonProps, "children"> {
 
 interface CTAProps {
   title?: string;
+  description?: string;
   buttons?: CTAButtonProps[] | false;
   className?: string;
 }
@@ -25,6 +26,7 @@ const DEFAULT_CTA_BUTTONS: CTAButtonProps[] = [
 
 export default function CTA({
   title = "Start building",
+  description,
   buttons = DEFAULT_CTA_BUTTONS,
   className,
 }: CTAProps) {
@@ -34,6 +36,11 @@ export default function CTA({
         <h2 className="max-w-[640px] text-3xl leading-tight font-semibold sm:text-5xl sm:leading-tight">
           {title}
         </h2>
+        {description && (
+          <p className="text-md text-muted-foreground max-w-[640px] font-medium sm:text-xl">
+            {description}
+          </p>
+        )}
         {buttons !== false && buttons.length > 0 && (
           <div className="flex justify-center gap-4">
             {buttons.map((button) => (

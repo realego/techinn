@@ -1,0 +1,14 @@
+[Unit]
+Description=Deactivate TechInn services after their paid billing periods end
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/home/my.techinn.co.zw/launch-ui/backend
+EnvironmentFile=/home/my.techinn.co.zw/launch-ui/backend/.env
+ExecStart=/home/my.techinn.co.zw/launch-ui/backend/.venv/bin/python manage.py process_expired_services --limit 100
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true

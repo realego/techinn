@@ -1,0 +1,15 @@
+[Unit]
+Description=Provision paid TechInn domains with Cloudflare and ZISPA
+After=network-online.target techinn-my-api.service
+
+[Service]
+Type=oneshot
+User=mytec3641
+Group=mytec3641
+WorkingDirectory=/home/my.techinn.co.zw/launch-ui/backend
+EnvironmentFile=/home/my.techinn.co.zw/launch-ui/backend/.env
+ExecStart=/home/my.techinn.co.zw/launch-ui/backend/.venv/bin/python manage.py process_domain_registrations --limit 25
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full

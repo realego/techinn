@@ -25,3 +25,17 @@ For this VPS, outgoing Postfix `smtp_helo_name = mail.techinn.co.zw` matches PTR
 `SUPPORT_TICKET_EMAIL` defaults to `support@technologyinn.co.zw`. New customer tickets and subsequent customer messages queue one admin notification per persisted event in the existing throttled outbox. Reply-To is the customer email. Existing tickets are not backfilled. Staff can review tickets at `/admin/services/supportticket/`. Replies sent from a mailbox are delivered to the customer, but are not imported into dashboard ticket messages; inbound threading requires a separate integration.
 
 Run `manage.py shell < deploy/configure_customer_domain_relay.py` as root to install the domain-specific Postfix relay using the configured Django cPanel credentials. The script verifies TLS and authenticates without sending a message, backs up Postfix config, installs a root-only password map, and uses a dedicated verified TLS transport on port 465. Only envelope senders at technologyinn.co.zw use that route; other customer domains retain their own direct sending route. Incoming MX stays on the VPS. Phone users must submit through TechInn SMTP as the mailbox they are sending from, not through personal Gmail SMTP. The script must be rerun after relay credential changes.
+
+### TechInn inbound forwarding
+`configure_techinn_forwarding.py` installs the VPS mail-host forwarding policy for
+`techinn.co.zw`. The domain catch-all forwards otherwise-unmatched addresses to
+`support@technologyinn.co.zw`, and the existing `info@`, `sales@`, and `support@`
+mailboxes also copy messages to support while retaining their mailbox delivery. Exact
+`accounts@techinn.co.zw` mappings are preserved and take precedence over the
+catch-all, so accounts mail is not forwarded to support. The script creates a
+timestamped `e_forwardings` backup under `/root/techinn-backups/` before each
+change and reloads Postfix after validating the configuration.
+
+Transactional notifications to support (shop enquiries and ticket alerts) use
+the local Postfix listener so they arrive in the VPS mailbox. Customer-facing
+replies and service messages continue through the configured cPanel SMTP relay.

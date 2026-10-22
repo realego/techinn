@@ -133,6 +133,7 @@ class Command(BaseCommand):
                     security=security,
                     recipient_list=[row.recipient_email],
                     reply_to=row.payload.get("reply_to") if row.email_template.slug in {"support-ticket-admin", "contact-admin"} else None,
+                    local_delivery=row.email_template.slug in {"support-ticket-admin", "contact-admin"},
                     fail_silently=False,
                 )
                 if count != 1:

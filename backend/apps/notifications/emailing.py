@@ -8,6 +8,7 @@ import re
 from django.conf import settings
 from django.core.cache import cache
 from django.core.mail import EmailMultiAlternatives
+from django.core.mail.backends.smtp import EmailBackend as SMTPBackend
 
 
 PORTAL = "https://my.techinn.co.zw"
@@ -185,7 +186,7 @@ def render_queued_email(slug, context, customer=None):
     return subject, "\n".join(text_lines), html, security
 
 
-def send_transactional(*, subject, text, recipient_list, html=None, security=False, reply_to=None, fail_silently=False):
+def send_transactional(*, subject, text, recipient_list, html=None, security=False, reply_to=None, local_delivery=False, fail_silently=False):
     from_email = _sender(security=security)
     # Request retries must not create an identical inbox burst. The key
     # includes the complete message content, so a legitimate state change or
@@ -209,7 +210,17 @@ def send_transactional(*, subject, text, recipient_list, html=None, security=Fal
     if html:
         message.attach_alternative(html, "text/html")
     try:
-        result = message.send(fail_silently=fail_silently)
+        if local_delivery:
+            # Support mailboxes hosted on this VPS must not be sent through
+            # the cPanel relay: that provider treats its own domain as local.
+            # Empty credentials explicitly disable Django's settings-based SMTP
+            # authentication.  The local Postfix listener accepts trusted local
+            # submissions without AUTH; passing None would fall back to the
+            # cPanel relay credentials from settings.
+            with SMTPBackend(host="127.0.0.1", port=25, username="", password="", timeout=settings.EMAIL_TIMEOUT, use_tls=False, use_ssl=False, fail_silently=fail_silently) as connection:
+                result = connection.send_messages([message])
+        else:
+            result = message.send(fail_silently=fail_silently)
     except Exception:
         cache.delete(dedupe_key)
         raise

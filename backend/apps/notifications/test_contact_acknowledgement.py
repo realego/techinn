@@ -29,6 +29,8 @@ class ContactAcknowledgementTests(TestCase):
         call_command('process_service_guides', stdout=StringIO())
         call_command('process_service_guides', stdout=StringIO())
         self.assertEqual(send.call_count, 2)
+        admin_call = next(call for call in send.call_args_list if call.kwargs.get('local_delivery'))
+        self.assertEqual(admin_call.kwargs['recipient_list'], ['support@technologyinn.co.zw'])
         row.refresh_from_db(); self.assertEqual(row.status, 'sent')
         admin = EmailQueue.objects.get(email_template__slug='contact-admin')
         self.assertEqual(admin.recipient_email, 'support@technologyinn.co.zw')

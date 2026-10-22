@@ -128,15 +128,17 @@ class CheckoutCreateSerializer(serializers.Serializer):
             "nameserver_ip_3",
             "nameserver_ip_4",
         }
-        if set(attrs["details"]) - allowed_details:
-            raise serializers.ValidationError({"details": "One or more checkout details are invalid."})
+        # Keep checkout forward-compatible with browser metadata from an older
+        # storefront. Only the fields used by ordering and provisioning are
+        # persisted; unknown UI fields must not block a valid payment.
+        attrs["details"] = {
+            key: value for key, value in attrs["details"].items() if key in allowed_details
+        }
         has_domain = any(line["product_id"] == "domains" for line in attrs["items"])
         if has_domain:
             details = attrs["details"]
             required_domain_fields = (
-                "business_name",
                 "registrant_name",
-                "registrant_business_name",
                 "physical_address",
                 "physical_city",
                 "physical_country",
@@ -144,7 +146,7 @@ class CheckoutCreateSerializer(serializers.Serializer):
             missing = [field for field in required_domain_fields if not details.get(field, "").strip()]
             if missing:
                 raise serializers.ValidationError({
-                    "details": "Enter the business name, registrant details, and physical address, city, and country."
+                    "details": "Enter the registrant name and complete physical address, city, and country."
                 })
             postal_fields = ("postal_address", "postal_city", "postal_country")
             if not all(details.get(field, "").strip() for field in postal_fields):
@@ -211,8 +213,9 @@ class CheckoutCreateSerializer(serializers.Serializer):
             "fbclid",
             "landing_path",
         }
-        if set(attrs["attribution"]) - allowed_attribution:
-            raise serializers.ValidationError({"attribution": "One or more attribution fields are invalid."})
+        attrs["attribution"] = {
+            key: value for key, value in attrs["attribution"].items() if key in allowed_attribution
+        }
         return attrs
 
 

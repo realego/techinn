@@ -14,6 +14,7 @@ const sections = [
   "account",
   "team",
   "connections",
+  "tickets",
 ]
 
 const titles: Record<string, string> = {
@@ -27,6 +28,7 @@ const titles: Record<string, string> = {
   account: "Account & Security",
   team: "Team Access",
   connections: "Provider Connections",
+  tickets: "Support Tickets",
 }
 
 export const dynamicParams = false

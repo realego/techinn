@@ -134,3 +134,24 @@ class ServiceAuditEventAdmin(admin.ModelAdmin):
         "payload",
         "created_at",
     )
+
+
+from apps.services.models import SupportTicket, SupportTicketMessage
+
+
+class SupportTicketMessageInline(admin.TabularInline):
+    model = SupportTicketMessage
+    extra = 0
+    readonly_fields = ('author', 'body', 'created_at')
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(SupportTicket)
+class SupportTicketAdmin(admin.ModelAdmin):
+    list_display = ('ticket_number', 'subject', 'customer', 'status', 'priority', 'updated_at')
+    list_filter = ('status', 'priority', 'category')
+    search_fields = ('subject', 'customer__email')
+    inlines = (SupportTicketMessageInline,)

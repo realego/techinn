@@ -113,9 +113,14 @@ export function CookieConsent() {
               <p className="text-xs leading-4 text-muted-foreground">
                 TechInn uses essential cookies to keep the site secure. With your permission, we also use Meta measurement cookies to understand campaigns and improve our services. You can change this choice any time in Cookie settings.
               </p>
-              <Link href="/privacy/" className="text-[11px] font-medium text-orange-500 underline underline-offset-2 hover:text-orange-400">
-                Read our privacy policy
-              </Link>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-medium">
+                <Link href="/privacy/" className="text-orange-500 underline underline-offset-2 hover:text-orange-400">
+                  Read our privacy policy
+                </Link>
+                <button type="button" className="text-orange-500 underline underline-offset-2 hover:text-orange-400" onClick={() => setSettingsOpen((value) => !value)}>
+                  Cookie settings
+                </button>
+              </div>
             </>
           ) : (
             <div className="flex min-w-0 items-center gap-2 text-xs leading-4 text-muted-foreground">
@@ -127,9 +132,6 @@ export function CookieConsent() {
           )}
         </div>
         <div className="flex shrink-0 flex-wrap gap-1.5 sm:justify-end">
-          <Button type="button" size="xs" variant="ghost" onClick={() => setSettingsOpen((value) => !value)}>
-            Settings
-          </Button>
           <Button type="button" size="xs" variant="outline" onClick={() => saveConsent("rejected")}>
             Reject
           </Button>

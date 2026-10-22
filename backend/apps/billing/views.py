@@ -631,10 +631,13 @@ class CustomerWalletTopUpView(APIView):
         serializer = WalletTopUpSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         payload = serializer.validated_data
-        if payload.get("service_uuid") and not CustomerService.objects.filter(
-            uuid=payload["service_uuid"], customer=request.user,
-        ).exists():
-            return Response({"detail": "The selected service renewal is not available."}, status=status.HTTP_404_NOT_FOUND)
+        if payload.get("service_uuid"):
+            service = CustomerService.objects.filter(uuid=payload["service_uuid"], customer=request.user).first()
+            if not service:
+                return Response({"detail": "The selected service renewal is not available."}, status=status.HTTP_404_NOT_FOUND)
+            suspension = (service.provisioning_data or {}).get("manual_suspension")
+            if service.status == CustomerService.Status.SUSPENDED and suspension and suspension.get("reason") == "customer":
+                return Response({"detail": "Restore this service before starting its renewal."}, status=status.HTTP_409_CONFLICT)
         if not is_configured():
             return Response(
                 {"detail": "Online payments are not available right now. Please try again later."},

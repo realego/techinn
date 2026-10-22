@@ -20,10 +20,19 @@ def new_refresh(customer):
 
 
 def session_for(token, customer_id):
+    # Treat malformed or legacy tokens as an expired session.  Accessing a
+    # missing claim must never bubble up as a 500 from dashboard/activity.
+    if token is None or not hasattr(token, "get"):
+        raise AuthenticationFailed('Your session expired. Please sign in again.')
     sid = token.get('sid')
     if not sid:
         # Existing short-lived access tokens remain usable during the rollout.
-        if timezone.now().timestamp() - token['iat'] >= IDLE_LIMIT.total_seconds():
+        issued_at = token.get('iat')
+        try:
+            age = timezone.now().timestamp() - float(issued_at)
+        except (TypeError, ValueError):
+            raise AuthenticationFailed('Your session expired. Please sign in again.')
+        if age >= IDLE_LIMIT.total_seconds():
             raise AuthenticationFailed('Your session expired. Please sign in again.')
         return None
     session = PortalSession.objects.filter(pk=sid, customer_id=customer_id, revoked=False).first()

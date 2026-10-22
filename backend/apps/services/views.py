@@ -32,11 +32,15 @@ from apps.services.models import (
     ProvisioningAction,
     ServiceAuditEvent,
     ServiceMember,
+    SupportTicket,
+    SupportTicketMessage,
 )
 from apps.services.permissions import accessible_services_for, require_service_permission
 from apps.services.storage import mailbox_storage_budget
 from apps.services.fields import encrypt_secret
 from apps.services.providers.cloudflare import CloudflareClient, CloudflareError, cloudflare_credentials
+from apps.services.providers.cyberpanel import CyberPanelClient, CyberPanelError
+from apps.services.website_suspension import WebsiteSuspensionError, restore_websites, suspend_websites
 from apps.services.serializers import (
     CloudflareZoneConnectSerializer,
     DNSRecordSerializer,
@@ -55,6 +59,8 @@ from apps.services.serializers import (
     ProvisioningActionSerializer,
     ServiceAuditEventSerializer,
     ServiceMemberSerializer,
+    SupportTicketSerializer,
+    SupportTicketMessageSerializer,
 )
 from apps.services.domain_availability import check_domain_availability, normalize_domain_name
 from apps.orders.models import Order
@@ -192,7 +198,8 @@ class DashboardView(CustomerServiceQueryMixin, generics.GenericAPIView):
                         {
                             "id": mailbox.id,
                             "email_address": mailbox.email_address,
-                            "webmail_url": f"https://{mailbox.effective_domain}/webmail/",
+                            "webmail_url": security.get("webmail_url") if security.get("webmail_status") == "active" else settings.TECHINN_WEBMAIL_URL,
+                            "webmail_domain_pending": security.get("webmail_status") != "active",
                             "quota_mb": mailbox.quota_mb,
                             "used_mb": mailbox.used_mb,
                             "status": mailbox.status,
@@ -207,19 +214,30 @@ class DashboardView(CustomerServiceQueryMixin, generics.GenericAPIView):
 
             service_domains = list(service.domains.all())
             primary_domain = getattr(getattr(service, "hosting_account", None), "primary_domain", None)
-            if primary_domain and primary_domain.status == DomainAsset.Status.ACTIVE:
+            if primary_domain and primary_domain.status in (
+                DomainAsset.Status.ACTIVE,
+                DomainAsset.Status.PENDING,
+                DomainAsset.Status.TRANSFER_PENDING,
+            ):
                 if all(domain.id != primary_domain.id for domain in service_domains):
                     service_domains.append(primary_domain)
             if service.product.service_type.slug == "email-hosting" and permissions["can_manage_email"]:
-                email_domains = DomainAsset.objects.filter(
-                    customer_service__in=self.get_service_queryset(),
-                    status=DomainAsset.Status.ACTIVE,
-                    id__in=HostingAccount.objects.filter(
-                        status=HostingAccount.Status.ACTIVE,
-                        primary_domain__isnull=False,
-                    ).values("primary_domain_id"),
-                ).select_related("customer_service").order_by("domain_name")
-                for candidate in email_domains:
+                # Email plans are selected against a customer's domain assets,
+                # not against whichever domain already has a CyberPanel account.
+                # Include pending assets as well: the dashboard must show the
+                # card immediately and mark it inactive until registration or
+                # connection finishes.  The frontend de-duplicates these by
+                # domain id so a web plan and an email plan cannot create two
+                # cards for the same root domain.
+                customer_domains = DomainAsset.objects.filter(
+                    customer_service__customer=service.customer,
+                    status__in=(
+                        DomainAsset.Status.ACTIVE,
+                        DomainAsset.Status.PENDING,
+                        DomainAsset.Status.TRANSFER_PENDING,
+                    ),
+                ).order_by("domain_name")
+                for candidate in customer_domains:
                     try:
                         require_service_permission(request.user, candidate.customer_service, "can_manage_email")
                     except PermissionDenied:
@@ -300,6 +318,7 @@ class DashboardView(CustomerServiceQueryMixin, generics.GenericAPIView):
                 "annually": "yearly",
                 "annual": "yearly",
             }.get(billing_interval, billing_interval)
+            manual_suspension = (service.provisioning_data or {}).get("manual_suspension")
             results.append(
                 {
                     "uuid": service.uuid,
@@ -309,7 +328,7 @@ class DashboardView(CustomerServiceQueryMixin, generics.GenericAPIView):
                     "service_type_name": service.product.service_type.name,
                     "dashboards": service_dashboard_links(service, is_owner or permissions["can_manage_hosting"]),
                     "billing": {"unit_price": str(service.order_item.unit_price), "currency": service.order_item.order.currency, "next_due_at": service.next_due_at, "interval": billing_interval} if permissions["can_view_billing"] and service.order_item_id else None,
-                    "renewal": {"href": f"/dashboard/billing/?renew={service.uuid}#billing-payment", "service_uuid": str(service.uuid)} if permissions["can_view_billing"] and service.expires_at else None,
+                    "renewal": {"href": f"/dashboard/billing/?renew={service.uuid}#billing-payment", "service_uuid": str(service.uuid)} if permissions["can_view_billing"] and service.expires_at and not (manual_suspension and manual_suspension.get("reason") == "customer") else None,
                     "is_owner": is_owner,
                     "permissions": permissions,
                     "status": service.status,
@@ -320,6 +339,7 @@ class DashboardView(CustomerServiceQueryMixin, generics.GenericAPIView):
                     "hosting": hosting,
                     "domains": domains,
                     "domain_options": domain_options,
+                    "suspension": manual_suspension or None,
                 }
             )
         connections = ProviderConnection.objects.filter(
@@ -327,6 +347,135 @@ class DashboardView(CustomerServiceQueryMixin, generics.GenericAPIView):
             scope=ProviderConnection.Scope.CUSTOMER,
         ).values("id", "provider", "name", "status", "last_verified_at")
         return Response({"services": results, "provider_connections": list(connections)})
+
+
+class ServiceControlView(CustomerServiceQueryMixin, APIView):
+    """Customer initiated, reversible suspension for paid web and email services."""
+
+    @transaction.atomic
+    def post(self, request, service_uuid):
+        action = str(request.data.get("action", "")).strip().lower()
+        if action not in {"suspend", "restore"}:
+            raise ValidationError({"action": "Choose suspend or restore."})
+        service = self.get_service_queryset().select_for_update().select_related(
+            "product__service_type", "hosting_account__primary_domain"
+        ).filter(uuid=service_uuid).first()
+        if not service:
+            raise NotFound("Service was not found.")
+        service_type = service.product.service_type.slug
+        permission = "can_manage_hosting" if service_type == "web-hosting" else "can_manage_email" if service_type == "email-hosting" else None
+        if not permission:
+            raise ValidationError({"detail": "Only hosting and email services can be suspended here."})
+        if not service.customer_id == request.user.id:
+            raise PermissionDenied("Only the service owner can suspend or restore a service.")
+        data = dict(service.provisioning_data or {})
+        manual = data.get("manual_suspension") or {}
+        if action == "suspend":
+            if service.status == CustomerService.Status.SUSPENDED and manual.get("reason") == "customer":
+                return Response({"status": service.status, "detail": "This service is already suspended."})
+            if service.status != CustomerService.Status.ACTIVE:
+                raise ValidationError({"detail": "Only an active service can be suspended."})
+            account = getattr(service, "hosting_account", None)
+            if service_type == "web-hosting" and account and account.primary_domain:
+                connection = ProviderConnection.objects.filter(
+                    provider=ProviderConnection.Provider.CYBERPANEL,
+                    scope=ProviderConnection.Scope.GLOBAL,
+                    customer__isnull=True,
+                    status=ProviderConnection.Status.ACTIVE,
+                ).first()
+                try:
+                    if connection:
+                        CyberPanelClient(connection).set_website_status(domain=account.primary_domain.domain_name, state="Suspend")
+                    suspend_websites(service)
+                except (CyberPanelError, WebsiteSuspensionError, OSError, ValueError) as error:
+                    raise ValidationError({"detail": f"The website could not be suspended safely: {error}"}) from error
+                account.status = HostingAccount.Status.SUSPENDED
+                account.save(update_fields=("status", "updated_at"))
+            elif account:
+                account.status = HostingAccount.Status.SUSPENDED
+                account.save(update_fields=("status", "updated_at"))
+                account.mailboxes.filter(status=Mailbox.Status.ACTIVE).update(status=Mailbox.Status.SUSPENDED)
+            data["manual_suspension"] = {
+                "reason": "customer",
+                "suspended_at": timezone.now().isoformat(),
+                "previous_auto_renew": service.auto_renew,
+                "can_restore": True,
+            }
+            service.auto_renew = False
+            service.status = CustomerService.Status.SUSPENDED
+            service.provisioning_data = data
+            service.save(update_fields=("status", "auto_renew", "provisioning_data", "updated_at"))
+            _audit(service, request.user, "service.suspended.manual", "service", service.uuid, {"service_type": service_type})
+            return Response({"status": service.status, "detail": "Service suspended. Renewal is paused until you restore it."})
+
+        if service.status != CustomerService.Status.SUSPENDED or manual.get("reason") != "customer":
+            raise ValidationError({"detail": "This service is not suspended by you."})
+        expiry = service.expires_at or service.next_due_at
+        if expiry and expiry <= timezone.now():
+            raise ValidationError({"detail": "Renew the service before restoring it."})
+        account = getattr(service, "hosting_account", None)
+        if service_type == "web-hosting" and account and account.primary_domain:
+            connection = ProviderConnection.objects.filter(
+                provider=ProviderConnection.Provider.CYBERPANEL,
+                scope=ProviderConnection.Scope.GLOBAL,
+                customer__isnull=True,
+                status=ProviderConnection.Status.ACTIVE,
+            ).first()
+            try:
+                if connection:
+                    CyberPanelClient(connection).set_website_status(domain=account.primary_domain.domain_name, state="Un-Suspend")
+                restore_websites(service)
+            except (CyberPanelError, WebsiteSuspensionError, OSError, ValueError) as error:
+                raise ValidationError({"detail": f"The website could not be restored safely: {error}"}) from error
+        if account:
+            account.status = HostingAccount.Status.ACTIVE
+            account.save(update_fields=("status", "updated_at"))
+            if service_type == "email-hosting":
+                account.mailboxes.filter(status=Mailbox.Status.SUSPENDED).update(status=Mailbox.Status.ACTIVE)
+        service.auto_renew = bool(manual.get("previous_auto_renew", True))
+        data.pop("manual_suspension", None)
+        service.provisioning_data = data
+        service.status = CustomerService.Status.ACTIVE
+        service.save(update_fields=("status", "auto_renew", "provisioning_data", "updated_at"))
+        _audit(service, request.user, "service.restored.manual", "service", service.uuid, {"service_type": service_type})
+        return Response({"status": service.status, "detail": "Service restored."})
+
+
+class SupportTicketListCreateView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SupportTicketSerializer
+
+    def get_queryset(self):
+        return SupportTicket.objects.filter(customer=self.request.user).select_related(
+            "customer_service", "customer_service__product"
+        ).prefetch_related("messages__author")
+
+
+class SupportTicketDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _get(self, request, pk):
+        ticket = SupportTicket.objects.filter(customer=request.user, pk=pk).prefetch_related("messages__author").first()
+        if not ticket:
+            raise NotFound("Ticket was not found.")
+        return ticket
+
+    def get(self, request, pk):
+        return Response(SupportTicketSerializer(self._get(request, pk), context={"request": request}).data)
+
+    @transaction.atomic
+    def post(self, request, pk):
+        ticket = self._get(request, pk)
+        serializer = SupportTicketMessageSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        message = SupportTicketMessage.objects.create(ticket=ticket, author=request.user, body=serializer.validated_data["body"])
+        from apps.notifications.tickets import queue_ticket_notification
+        queue_ticket_notification(ticket, message)
+        if ticket.status in {SupportTicket.Status.RESOLVED, SupportTicket.Status.CLOSED}:
+            ticket.status = SupportTicket.Status.OPEN
+        ticket.save(update_fields=("status", "updated_at"))
+        ticket = self._get(request, pk)
+        return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
 
 
 class DomainListView(CustomerServiceQueryMixin, generics.ListAPIView):

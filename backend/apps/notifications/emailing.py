@@ -2,9 +2,11 @@
 
 from email.utils import parseaddr
 from html import escape
+import hashlib
 import re
 
 from django.conf import settings
+from django.core.cache import cache
 from django.core.mail import EmailMultiAlternatives
 
 
@@ -62,7 +64,24 @@ def render_queued_email(slug, context, customer=None):
     action_label, action_url = "Open dashboard", f"{PORTAL}/dashboard/"
     guide_url = f"{PORTAL}/how-to/getting-started/"
     note = "This is an automated TechInn message. If you did not expect it, contact support."
-    if slug == "contact-acknowledgement":
+    if slug == "contact-admin":
+        subject = title = "New TechInn shop enquiry"
+        intro = context.get("message", "New enquiry received")
+        details = [("Reference", context.get("reference", "")), ("Name", context.get("name", "")),
+                   ("Email", context.get("customer_email", "")), ("Phone", context.get("phone", "") or "Not provided"),
+                   ("Source", context.get("source", "shop"))]
+        action_label, action_url = "Open Django admin", f"{PORTAL}/admin/notifications/contactrequest/"
+        guide_url = None
+        note = "Reply to this email to respond to the enquirer."
+    elif slug == "support-ticket-admin":
+        subject = title = f"Support ticket {context.get('reference', '')}"
+        intro = context.get("message", "New support request")
+        details = [("Customer", context.get("customer_email", "")), ("Subject", context.get("subject", ""))]
+        action_label = "Open ticket admin"
+        action_url = f"{PORTAL}/admin/services/supportticket/{int(context['ticket_id'])}/change/"
+        guide_url = None
+        note = "Reply to this email to contact the customer. Email replies are not imported into the dashboard ticket thread."
+    elif slug == "contact-acknowledgement":
         subject, title = "We received your TechInn enquiry", "Your enquiry is with our team"
         intro = "Thank you for contacting TechInn. We have received your request from our shop. Our team will review what you need and respond using the contact details you provided."
         details = [("Enquiry reference", context.get("reference", "Recorded with our team"))]
@@ -168,6 +187,17 @@ def render_queued_email(slug, context, customer=None):
 
 def send_transactional(*, subject, text, recipient_list, html=None, security=False, reply_to=None, fail_silently=False):
     from_email = _sender(security=security)
+    # Request retries must not create an identical inbox burst. The key
+    # includes the complete message content, so a legitimate state change or
+    # a newly generated OTP is still delivered. Failed sends release the key
+    # so the caller can retry safely.
+    recipients = tuple(sorted(str(address).casefold() for address in recipient_list))
+    fingerprint = hashlib.sha256(
+        "\0".join((str(from_email), str(subject), str(text), str(html or ""), *recipients)).encode("utf-8")
+    ).hexdigest()
+    dedupe_key = f"techinn:email:dedupe:{fingerprint}"
+    if not cache.add(dedupe_key, True, timeout=15 * 60):
+        return 0
     message = EmailMultiAlternatives(
         subject=subject,
         body=text,
@@ -178,7 +208,14 @@ def send_transactional(*, subject, text, recipient_list, html=None, security=Fal
     )
     if html:
         message.attach_alternative(html, "text/html")
-    return message.send(fail_silently=fail_silently)
+    try:
+        result = message.send(fail_silently=fail_silently)
+    except Exception:
+        cache.delete(dedupe_key)
+        raise
+    if result != 1:
+        cache.delete(dedupe_key)
+    return result
 
 
 def send_mail(subject, message, from_email, recipient_list, fail_silently=False, **kwargs):

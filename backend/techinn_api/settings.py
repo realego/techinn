@@ -229,3 +229,5 @@ CSRF_COOKIE_SECURE = not DEBUG
 
 TECHINN_HOSTING_IPV4 = os.getenv("TECHINN_HOSTING_IPV4", "")
 TECHINN_WEBMAIL_URL = os.getenv("TECHINN_WEBMAIL_URL", "https://techinn.co.zw/webmail/")
+
+SUPPORT_TICKET_EMAIL = os.getenv("SUPPORT_TICKET_EMAIL", "support@technologyinn.co.zw")

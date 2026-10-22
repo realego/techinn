@@ -16,6 +16,7 @@ import {
   ExternalLink,
   Eye,
   EyeOff,
+  MoreVertical,
   Globe2,
   KeyRound,
   Mail,
@@ -43,6 +44,7 @@ import { CustomerSettings } from "@/components/customer-settings"
 import { DomainConnections } from "@/components/domain-connections"
 import { DomainSearchPanel } from "@/components/domain-search-panel"
 import { ServiceTeam } from "@/components/service-team"
+import { SupportTickets } from "@/components/support-tickets"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -151,6 +153,7 @@ type DashboardService = {
   hosting: DashboardHosting
   domains: DashboardDomain[]
   domain_options?: { id: number; name: string; status: string; selected: boolean }[]
+  suspension?: { reason?: string; suspended_at?: string; can_restore?: boolean } | null
 }
 
 function mailboxStorage(hosting: DashboardHosting) {
@@ -357,6 +360,7 @@ const dashboardViewTitles: Record<string, string> = {
   account: "Account & security",
   team: "Team access",
   connections: "Domain connections",
+  tickets: "Support tickets",
 }
 const dashboardViewDescriptions: Record<string, string> = {
   services: "Your chatbots, websites, apps and hosting services.",
@@ -370,6 +374,7 @@ const dashboardViewDescriptions: Record<string, string> = {
   account: "Update your contact details and secure your TechInn account.",
   team: "Manage customer access to services you own.",
   connections: "Connect your domain to your website and email hosting.",
+  tickets: "Open a conversation with TechInn support and keep the service or billing context attached.",
 }
 const dashboardDataViews = new Set([
   "services",
@@ -380,6 +385,7 @@ const dashboardDataViews = new Set([
   "analytics",
   "team",
   "connections",
+  "tickets",
 ])
 
 function listItems<T>(response: ListResponse<T>) {
@@ -482,6 +488,7 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
     setRenewalServiceUuid(new URLSearchParams(window.location.search).get("renew") ?? "")
   }, [])
   const [expandedEmailDomainId, setExpandedEmailDomainId] = useState<number | null>(null)
+  const [emailRootFilter, setEmailRootFilter] = useState("")
   const [selectedEmailDomainByRoot, setSelectedEmailDomainByRoot] = useState<Record<number, string>>({})
   const [storageBillingIntervalByService, setStorageBillingIntervalByService] = useState<Record<string, "monthly" | "yearly">>({})
   const [dnsName, setDnsName] = useState("@")
@@ -493,6 +500,7 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
   const [editingDnsRecord, setEditingDnsRecord] = useState<number | null>(null)
   const [dnsSearch, setDnsSearch] = useState("")
   const [mailboxSearch, setMailboxSearch] = useState("")
+  const [emailSetupOpen, setEmailSetupOpen] = useState(false)
   const [accessEmail, setAccessEmail] = useState("")
   const [selectedMailbox, setSelectedMailbox] = useState("")
   const [profileForm, setProfileForm] = useState<{
@@ -511,6 +519,18 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
     last_name: customer?.last_name ?? "",
     phone: customer?.phone ?? "",
     company_name: customer?.company_name ?? "",
+  }
+
+  async function controlService(service: DashboardService, action: "suspend" | "restore") {
+    const key = `${action}Service:${service.uuid}`
+    setActiveAction(key); setIsWorking(true); setError(""); setNotice("")
+    try {
+      const result = await apiRequest<{ detail?: string }>(`/services/${service.uuid}/control/`, { method: "POST", body: JSON.stringify({ action }) })
+      setNotice(result.detail ?? (action === "suspend" ? "Service suspended." : "Service restored."))
+      await refreshDashboard(undefined, { silent: true })
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The service action could not be completed.")
+    } finally { setIsWorking(false); setActiveAction("") }
   }
 
   const refreshDashboard = useCallback(async (signal?: AbortSignal, options?: { silent?: boolean }) => {
@@ -700,6 +720,18 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
     () => services.filter((service) => (service.hosting || service.service_type === "email-hosting") && service.permissions.can_manage_email),
     [services],
   )
+  const emailDomainOwners = useMemo(() => {
+    const owners = new Map<number, { uuid: string; rank: number }>()
+    for (const service of emailServices) {
+      for (const domain of service.domains) {
+        const exactHostedDomain = service.hosting?.primary_domain?.toLowerCase() === domain.name.toLowerCase()
+        const rank = exactHostedDomain ? 3 : service.service_type === "email-hosting" ? 2 : 1
+        const current = owners.get(domain.id)
+        if (!current || rank > current.rank) owners.set(domain.id, { uuid: service.uuid, rank })
+      }
+    }
+    return owners
+  }, [emailServices])
   useEffect(() => {
     const hasPendingMailbox = services.some((service) =>
       service.hosting?.mailboxes.some((mailbox) => ["pending", "clearing", "deleting"].includes(mailbox.status) || Boolean(mailbox.pending_action)),
@@ -1420,6 +1452,7 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
             <SectionHeading image="/dashboard-icons/hosting.webp" title="Websites & hosting" description="Choose a domain for your website." />
             {services.filter((service) => service.service_type === "web-hosting").length ? services.filter((service) => service.service_type === "web-hosting").map((service) => {
               const isHostingService = service.service_type === "web-hosting"
+              const serviceSuspended = service.status === "suspended" || service.hosting?.status === "suspended"
               const domainOptions = service.domain_options ?? []
               const storageSummary = mailboxStorage(service.hosting)
               const storagePercentage = storageSummary.limitMB
@@ -1447,7 +1480,7 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
                 (website) => website.domain_name === selectedWebsite && website.status === "active",
               )
               return <Card key={service.uuid}>
-                <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3 px-0 py-3 md:px-6 md:py-6">
+                <CardHeader className={`flex flex-row flex-wrap items-start justify-between gap-3 px-0 py-3 md:px-6 md:py-6 ${service.status === "suspended" ? "opacity-80" : ""}`}>
                   <div className="min-w-0 flex-1">
                     <button
                       aria-controls={`hosting-details-${service.uuid}`}
@@ -1479,14 +1512,26 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
                       <ChevronDown className={`size-3 transition-transform ${expandedHostingServiceUuid === service.uuid ? "rotate-180" : ""}`} />
                     </Button>
                   </div>
+                  <details className="relative shrink-0">
+                    <summary aria-label={`Actions for ${service.product}`} className="flex size-9 cursor-pointer list-none items-center justify-center rounded-md border text-muted-foreground outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-orange-500/40 [&::-webkit-details-marker]:hidden"><MoreVertical className="size-4" /></summary>
+                    <div className="absolute right-0 z-30 mt-2 w-52 rounded-lg border bg-background p-1 shadow-xl">
+                      <Link className="block rounded-md px-3 py-2 text-sm hover:bg-muted" href={`/dashboard/tickets/?service=${service.uuid}&category=hosting`}>Contact support</Link>
+                      {service.status === "suspended" ? (
+                        <button className="block w-full rounded-md px-3 py-2 text-left text-sm hover:bg-muted disabled:opacity-50" disabled={isWorking || !service.suspension?.can_restore} onClick={() => void controlService(service, "restore")} type="button">Restore service</button>
+                      ) : (
+                        <button className="block w-full rounded-md px-3 py-2 text-left text-sm text-orange-700 hover:bg-orange-50 disabled:opacity-50 dark:text-orange-300 dark:hover:bg-orange-950/30" disabled={isWorking || !service.is_owner || service.status !== "active"} onClick={() => void controlService(service, "suspend")} type="button">Suspend service</button>
+                      )}
+                    </div>
+                  </details>
                 </CardHeader>
+                {service.status === "suspended" && <div className="mx-0 mb-3 rounded-lg border border-orange-300 bg-orange-50/60 px-4 py-3 text-sm text-orange-900 dark:border-orange-900 dark:bg-orange-950/20 dark:text-orange-100 md:mx-6">Suspended by TechInn. Restore the service before making changes.</div>}
                 {isHostingService && !service.hosting && (
                   <CardContent className="space-y-3 pt-0">
                     <div className="rounded-lg border border-orange-300 bg-orange-50/60 p-4 text-sm dark:border-orange-900 dark:bg-orange-950/20">
                       <p className="font-medium">Choose the domain for this website</p>
                       <p className="mt-1 text-muted-foreground">Your hosting is paid. Choose a purchased or connected domain to start preparing your website, even while registration is processing.</p>
                       <div className="mt-3 flex gap-2">
-                        <select aria-label={`Domain for ${service.product}`} className="h-10 min-w-0 flex-1 rounded-md border border-orange-400 bg-background px-3 text-sm" disabled={!service.permissions.can_manage_hosting || isWorking} onChange={(event) => void selectServiceDomain(service, event.target.value)} value={domainOptions.find((domain) => domain.selected)?.name ?? ""}>
+                        <select aria-label={`Domain for ${service.product}`} className="h-10 min-w-0 flex-1 rounded-md border border-orange-400 bg-background px-3 text-sm" disabled={serviceSuspended || !service.permissions.can_manage_hosting || isWorking} onChange={(event) => void selectServiceDomain(service, event.target.value)} value={domainOptions.find((domain) => domain.selected)?.name ?? ""}>
                           <option value="">Select a domain</option>
                           {domainOptions.map((domain) => <option key={domain.id} value={domain.name}>{domain.name}{domain.status !== "active" ? ` · ${domain.status}` : ""}</option>)}
                         </select>
@@ -1510,7 +1555,7 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
                         <select
                           aria-label={`Website domain for ${service.product}`}
                           className="h-10 w-full rounded-md border border-black bg-orange-50/70 px-3 text-sm shadow-sm focus-visible:border-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/30 dark:border-white dark:bg-orange-950/25 dark:focus-visible:border-white"
-                          disabled={!service.permissions.can_manage_hosting || isWorking}
+                          disabled={serviceSuspended || !service.permissions.can_manage_hosting || isWorking}
                           id={`primary-domain-${service.uuid}`}
                           onChange={(event) => void updatePrimaryDomain(service, event.target.value)}
                           value={service.domains.find((domain) => domain.name === service.hosting?.primary_domain)?.id.toString() ?? ""}
@@ -1540,7 +1585,7 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
                             Website
                           <select
                             className="h-10 w-full rounded-md border border-black bg-orange-50/70 px-3 text-sm shadow-sm focus-visible:border-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/30 dark:border-white dark:bg-orange-950/25 dark:focus-visible:border-white"
-                            disabled={!service.is_owner || !service.permissions.can_manage_hosting || isWorking}
+                            disabled={serviceSuspended || !service.is_owner || !service.permissions.can_manage_hosting || isWorking}
                             id={`file-manager-website-${service.hosting.id}`}
                             onChange={(event) => setSelectedWebsiteByAccount((current) => ({
                               ...current,
@@ -1552,7 +1597,7 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
                           </select>
                           </label>
                         </div>
-                        {service.permissions.can_manage_hosting && ["active", "provisioning"].includes(service.status) && service.hosting.status === "active" && (
+                        {!serviceSuspended && service.permissions.can_manage_hosting && ["active", "provisioning"].includes(service.status) && service.hosting.status === "active" && (
                           <form className="space-y-3 rounded-lg border p-4" onSubmit={(event) => void createSubdomainWebsite(event, service)}>
                             <div>
                               <p className="text-sm font-medium">Add a subdomain website</p>
@@ -1582,7 +1627,7 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
                               </span>
                             </label>
                             <div className="flex flex-wrap items-center gap-3">
-                              <Button className="h-9 bg-orange-600 bg-none text-white hover:bg-orange-700 dark:text-white" disabled={isWorking} loading={workingOn(`requestSubdomainWebsite:${service.hosting!.id}`)} type="submit">
+                              <Button className="h-9 bg-orange-600 bg-none text-white hover:bg-orange-700 dark:text-white" disabled={serviceSuspended || isWorking} loading={workingOn(`requestSubdomainWebsite:${service.hosting!.id}`)} type="submit">
                                 <Plus className="size-4" />Create website
                               </Button>
                               <p className="text-xs text-muted-foreground">Point its DNS to your hosting server before installing a certificate.</p>
@@ -1591,7 +1636,7 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
                         )}
                       </div>
                     )}
-                    {service.is_owner && service.permissions.can_manage_hosting && service.hosting.primary_domain && ["active", "provisioning"].includes(service.status) && service.hosting.status === "active" && (
+                    {!serviceSuspended && service.is_owner && service.permissions.can_manage_hosting && service.hosting.primary_domain && ["active", "provisioning"].includes(service.status) && service.hosting.status === "active" && (
                       <div className="flex flex-wrap items-center gap-2">
                         <Button className="bg-orange-600 bg-none text-white hover:bg-orange-700 dark:text-white" disabled={openingFiles !== null} loading={openingFiles === service.hosting.id} onClick={() => void openFileManager(service.hosting!.id, selectedWebsite)} type="button"><ExternalLink className="size-4" />Open File Manager</Button>
                         <Button
@@ -2147,7 +2192,26 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
           </section>}
 
           {view === "email" && <section className="min-w-0 space-y-4" id="email">
-            <SectionHeading image="/dashboard-icons/email.webp" helpHref="/how-to/dashboard-domain-email/" title="Business email" />
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <SectionHeading image="/dashboard-icons/email.webp" helpHref="/how-to/dashboard-domain-email/" title="Business email" />
+              <Button className="border-orange-300 text-orange-700 dark:border-orange-800 dark:text-orange-300" onClick={() => setEmailSetupOpen(true)} size="sm" variant="outline"><Mail className="size-4" /> Set up a device</Button>
+            </div>
+            {emailSetupOpen && <EmailDeviceSetup domains={domains.filter((domain) => emailDomainOwners.has(domain.id)).map((domain) => domain.name)} onClose={() => setEmailSetupOpen(false)} />}
+            <div className="flex flex-col gap-2 rounded-xl border border-orange-200 bg-orange-50/40 p-3 dark:border-orange-900 dark:bg-orange-950/10 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold">Email domains</p>
+                <p className="text-xs text-muted-foreground">Filter the cards below by root domain. Pending domains remain visible while they are being activated.</p>
+              </div>
+              <select aria-label="Filter email cards by root domain" className="h-10 w-full min-w-0 rounded-md border border-orange-400 bg-background px-3 text-sm sm:w-72" onChange={(event) => {
+                setEmailRootFilter(event.target.value)
+                setExpandedEmailDomainId(null)
+              }} value={emailRootFilter}>
+                <option value="">All domains</option>
+                {domains.filter((domain) => emailDomainOwners.has(domain.id)).sort((left, right) => left.name.localeCompare(right.name)).map((domain) => (
+                  <option key={domain.id} value={String(domain.id)}>{domain.name}{domain.status !== "active" ? ` · ${domain.status}` : ""}</option>
+                ))}
+              </select>
+            </div>
             {emailServices.filter((service) => !service.hosting).map((service) => {
               const domainOptions = service.domain_options ?? []
               return (
@@ -2170,8 +2234,9 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
             })}
             {emailServices.map((service) => {
               const eligibleDomains = service.domains.filter((domain) =>
-                domain.status === "active"
-                && domain.permissions.can_manage_email,
+                emailDomainOwners.get(domain.id)?.uuid === service.uuid
+                && domain.permissions.can_manage_email
+                && (!emailRootFilter || String(domain.id) === emailRootFilter),
               )
               const emailStorage = mailboxStorage(service.hosting)
               return (
@@ -2203,12 +2268,13 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
                   const domainMailUsedMB = domainMailboxes.reduce((total, mailbox) => total + mailbox.used_mb, 0)
                   const domainMailAllocatedMB = domainMailboxes.reduce((total, mailbox) => total + mailbox.quota_mb, 0)
                   const expanded = expandedEmailDomainId === domain.id
-                  return (
-              <Card className="border-0 shadow-none md:border md:shadow-sm" key={`${service.uuid}-${domain.id}`}>
-                <CardHeader className="p-0">
+              return (
+              <Card className={`min-w-0 max-w-full overflow-hidden border-0 shadow-none md:border md:shadow-sm ${service.status === "suspended" ? "opacity-80" : ""}`} key={`${service.uuid}-${domain.id}`}>
+                <CardHeader className="min-w-0 max-w-full overflow-hidden p-0">
+                  <div className="flex min-w-0 max-w-full items-center gap-2 overflow-hidden p-3 md:p-4">
                   <button
                     aria-expanded={expanded}
-                    className="flex w-full min-w-0 items-center justify-between gap-3 rounded-lg p-3 text-left transition-colors hover:bg-muted/40 md:p-4"
+                    className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-lg text-left transition-colors hover:bg-muted/40"
                     onClick={() => setExpandedEmailDomainId((current) => current === domain.id ? null : domain.id)}
                     type="button"
                   >
@@ -2224,22 +2290,32 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
                       <ChevronDown className={`size-4 transition-transform ${expanded ? "rotate-180" : ""}`} />
                     </span>
                   </button>
+                  <details className="relative shrink-0">
+                    <summary aria-label={`Actions for ${domain.name}`} className="flex size-9 cursor-pointer list-none items-center justify-center rounded-md border text-muted-foreground outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-orange-500/40 [&::-webkit-details-marker]:hidden"><MoreVertical className="size-4" /></summary>
+                    <div className="absolute right-0 z-30 mt-2 w-52 rounded-lg border bg-background p-1 shadow-xl">
+                      <Link className="block rounded-md px-3 py-2 text-sm hover:bg-muted" href={`/dashboard/tickets/?service=${service.uuid}&category=email`}>Contact support</Link>
+                      {service.status === "suspended" ? <button className="block w-full rounded-md px-3 py-2 text-left text-sm hover:bg-muted disabled:opacity-50" disabled={isWorking || !service.suspension?.can_restore} onClick={() => void controlService(service, "restore")} type="button">Restore service</button> : <button className="block w-full rounded-md px-3 py-2 text-left text-sm text-orange-700 hover:bg-orange-50 disabled:opacity-50 dark:text-orange-300" disabled={isWorking || !service.is_owner || service.status !== "active"} onClick={() => void controlService(service, "suspend")} type="button">Suspend service</button>}
+                    </div>
+                  </details>
+                  </div>
                 </CardHeader>
-                {expanded && <CardContent className="space-y-3 px-0 pb-4 pt-3 md:px-6 md:pb-6">
-                  <div className="overflow-hidden border-y bg-card md:rounded-xl md:border">
-                    <div className="flex flex-wrap items-center justify-between gap-3 py-3 md:border-b md:bg-muted/30 md:px-4">
-                      <div>
+                {service.status === "suspended" && <div className="mx-0 mb-3 rounded-lg border border-orange-300 bg-orange-50/60 px-4 py-3 text-sm text-orange-900 dark:border-orange-900 dark:bg-orange-950/20 dark:text-orange-100 md:mx-6">Suspended by TechInn. Restore the service before making changes.</div>}
+                {expanded && <CardContent className="min-w-0 max-w-full space-y-3 overflow-hidden px-0 pb-4 pt-3 md:px-6 md:pb-6">
+                  <div className="min-w-0 max-w-full overflow-hidden border-y bg-card md:rounded-xl md:border">
+                    <div className="flex min-w-0 max-w-full flex-wrap items-center justify-between gap-3 overflow-hidden py-3 md:border-b md:bg-muted/30 md:px-4">
+                      <div className="min-w-0 max-w-full">
                         <p className="text-sm font-semibold">Email accounts · {selectedEmailDomain}</p>
                         <p className="text-xs text-muted-foreground">
                           {domainMailboxes.length} accounts · {formatStorageMB(domainMailUsedMB)} used / {formatStorageMB(domainMailAllocatedMB)} allocated
                         </p>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
                         <label className="sr-only" htmlFor={`email-domain-${service.uuid}-${domain.id}`}>Email domain</label>
                         <select
                           aria-label={`Email domain for ${domain.name}`}
-                          className="h-9 min-w-0 max-w-56 rounded-md border bg-background px-2 text-xs"
+                          className="h-9 min-w-0 w-full max-w-full rounded-md border bg-background px-2 text-xs sm:w-auto sm:max-w-56"
                           id={`email-domain-${service.uuid}-${domain.id}`}
+                          disabled={service.status === "suspended"}
                           onChange={(event) => setSelectedEmailDomainByRoot((current) => ({
                             ...current,
                             [domain.id]: event.target.value,
@@ -2248,7 +2324,7 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
                         >
                           {emailDomainOptions.map((emailDomain) => <option key={emailDomain} value={emailDomain}>{emailDomain}</option>)}
                         </select>
-                        <div className="relative w-full sm:w-56"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input aria-label="Filter email accounts" className="h-9 pl-9" onChange={(event) => setMailboxSearch(event.target.value)} placeholder="Filter accounts" value={mailboxSearch} /></div>
+                        <div className="relative min-w-0 w-full sm:w-56"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input aria-label="Filter email accounts" className="h-9 min-w-0 w-full pl-9" onChange={(event) => setMailboxSearch(event.target.value)} placeholder="Filter accounts" value={mailboxSearch} /></div>
                         <span className="text-xs text-muted-foreground">{domainMailboxes.length} accounts</span>
                       </div>
                     </div>
@@ -2304,16 +2380,16 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
                             </TableCell>
                             {service.permissions.can_manage_email && <TableCell className="text-right">
                               <div className="flex justify-end gap-1">
-                                <Button aria-label={`Change storage allocation for ${mailbox.email_address}`} className="h-8" disabled={isWorking || Boolean(mailbox.pending_action) || mailbox.status !== "active"} onClick={() => beginMailboxQuotaEdit(mailbox)} size="sm" variant="outline">
+                                <Button aria-label={`Change storage allocation for ${mailbox.email_address}`} className="h-8" disabled={service.status === "suspended" || isWorking || Boolean(mailbox.pending_action) || mailbox.status !== "active"} onClick={() => beginMailboxQuotaEdit(mailbox)} size="sm" variant="outline">
                                   <Pencil className="size-3.5" /><span className="hidden sm:inline">Storage</span>
                                 </Button>
-                                <Button aria-label={`Reset password for ${mailbox.email_address}`} className="h-8" disabled={isWorking || Boolean(mailbox.pending_action) || mailbox.status !== "active"} onClick={() => setPasswordResetMailbox(mailbox)} size="sm" variant="outline">
+                                <Button aria-label={`Reset password for ${mailbox.email_address}`} className="h-8" disabled={service.status === "suspended" || isWorking || Boolean(mailbox.pending_action) || mailbox.status !== "active"} onClick={() => setPasswordResetMailbox(mailbox)} size="sm" variant="outline">
                                   <KeyRound className="size-3.5" /><span className="hidden sm:inline">Reset password</span>
                                 </Button>
-                                <Button aria-label={`Clear stored messages for ${mailbox.email_address}`} className="h-8" disabled={isWorking || Boolean(mailbox.pending_action) || mailbox.status !== "active"} loading={workingOn(`clearMailboxStorage:${mailbox.id}`)} onClick={() => void clearMailboxStorage(mailbox)} size="sm" variant="outline">
+                                <Button aria-label={`Clear stored messages for ${mailbox.email_address}`} className="h-8" disabled={service.status === "suspended" || isWorking || Boolean(mailbox.pending_action) || mailbox.status !== "active"} loading={workingOn(`clearMailboxStorage:${mailbox.id}`)} onClick={() => void clearMailboxStorage(mailbox)} size="sm" variant="outline">
                                   <Eraser className="size-3.5" /><span className="hidden sm:inline">Clear storage</span>
                                 </Button>
-                                <Button aria-label={`Delete ${mailbox.email_address}`} disabled={isWorking || Boolean(mailbox.pending_action) || mailbox.status === "pending" || mailbox.status === "clearing" || mailbox.status === "deleting" || mailbox.status === "deleted"} loading={workingOn(`deleteMailbox:${mailbox.id}`)} onClick={() => void deleteMailbox(mailbox)} size="icon" variant="ghost">
+                                <Button aria-label={`Delete ${mailbox.email_address}`} disabled={service.status === "suspended" || isWorking || Boolean(mailbox.pending_action) || mailbox.status === "pending" || mailbox.status === "clearing" || mailbox.status === "deleting" || mailbox.status === "deleted"} loading={workingOn(`deleteMailbox:${mailbox.id}`)} onClick={() => void deleteMailbox(mailbox)} size="icon" variant="ghost">
                                   <Trash2 className="size-4" />
                                 </Button>
                               </div>
@@ -2408,7 +2484,7 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
               </Card>
                   )
                 })}
-                {!eligibleDomains.length && <Card><CardContent className="flex flex-wrap items-center gap-2 p-4 text-sm text-muted-foreground"><Globe2 className="size-4 text-orange-600" />{service.hosting?.primary_domain ? <>Your domain <strong className="text-foreground">{service.hosting.primary_domain}</strong> is assigned to email hosting. It is still processing; wait for it to go live before creating email accounts.</> : <>Select a domain to manage its email accounts.</>}<Button asChild className="h-auto px-1 text-orange-700 dark:text-orange-300" size="sm" variant="link"><Link href="/dashboard/domains/">Select domain <ArrowUpRight className="size-3.5" /></Link></Button></CardContent></Card>}
+                {!eligibleDomains.length && !emailRootFilter && <Card><CardContent className="flex flex-wrap items-center gap-2 p-4 text-sm text-muted-foreground"><Globe2 className="size-4 text-orange-600" />{service.hosting?.primary_domain ? <>Your domain <strong className="text-foreground">{service.hosting.primary_domain}</strong> is assigned to email hosting. It is still processing; wait for it to go live before creating email accounts.</> : <>Select a domain to manage its email accounts.</>}<Button asChild className="h-auto px-1 text-orange-700 dark:text-orange-300" size="sm" variant="link"><Link href="/dashboard/domains/">Select domain <ArrowUpRight className="size-3.5" /></Link></Button></CardContent></Card>}
               </div>
               )
             })}
@@ -2702,6 +2778,11 @@ export function CustomerDashboard({ view = "overview" }: { view?: string }) {
             </Card>
           } />}
 
+          {view === "tickets" && <section className="min-w-0 space-y-4" id="tickets">
+            <SectionHeading title="Support tickets" description="Keep service, domain and billing questions in one conversation with TechInn." />
+            <SupportTickets services={services.map((service) => ({ uuid: service.uuid, product: service.product, service_type: service.service_type, status: service.status }))} />
+          </section>}
+
           {view === "team" && <section className="space-y-4" id="team">
             <SectionHeading title="Service team" description="Grant another registered TechInn customer access to a service." />
             {services.filter((service) => service.is_owner).map((service) => (
@@ -2909,6 +2990,52 @@ function LoadingTable({ columns }: { columns: string[] }) {
       </div>
     </div>
   )
+}
+
+function EmailDeviceSetup({ domains, onClose }: { domains: string[]; onClose: () => void }) {
+  const [copied, setCopied] = useState("")
+  const [domain, setDomain] = useState(domains.find((name) => name) ?? "yourdomain.tld")
+  const [mailbox, setMailbox] = useState("")
+  const [platform, setPlatform] = useState<"android" | "apple" | "outlook">("android")
+  const host = `mail.${domain}`
+  const settings = {
+    "IMAP server": `${host}:993 (SSL/TLS)`,
+    "POP3 server": `${host}:995 (SSL/TLS)`,
+    "SMTP server": `${host}:465 (SSL/TLS) or ${host}:587 (STARTTLS)`,
+    "Username": "Your complete email address",
+  }
+  async function copy(label: string, value: string) {
+    await navigator.clipboard.writeText(value)
+    setCopied(label)
+    window.setTimeout(() => setCopied(""), 1600)
+  }
+  function downloadConfiguration() {
+    const address = mailbox.trim() || `YOUR_MAILBOX@${domain}`
+    const body = platform === "apple"
+      ? `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>PayloadContent</key><array><dict><key>EmailAccountDescription</key><string>TechInn ${domain}</string><key>EmailAccountName</key><string>${address}</string><key>EmailAccountType</key><string>EmailTypeIMAP</string><key>EmailAccountHostName</key><string>${host}</string><key>EmailAccountUseSSL</key><true/><key>EmailAccountUsername</key><string>${address}</string><key>EmailAccountOutgoingMailServerHostName</key><string>${host}</string><key>EmailAccountOutgoingMailServerPortNumber</key><integer>465</integer><key>EmailAccountOutgoingMailServerUseSSL</key><true/><key>EmailAccountOutgoingMailServerUsername</key><string>${address}</string><key>PayloadDisplayName</key><string>TechInn Mail</string><key>PayloadIdentifier</key><string>co.techinn.mail.${domain}</string><key>PayloadType</key><string>com.apple.mail.managed</string><key>PayloadUUID</key><string>${crypto.randomUUID()}</string><key>PayloadVersion</key><integer>1</integer></dict></array><key>PayloadDisplayName</key><string>TechInn email</string><key>PayloadIdentifier</key><string>co.techinn.mail.profile.${domain}</string><key>PayloadOrganization</key><string>TechInn</string><key>PayloadRemovalDisallowed</key><false/><key>PayloadType</key><string>Configuration</string><key>PayloadUUID</key><string>${crypto.randomUUID()}</string><key>PayloadVersion</key><integer>1</integer></dict></plist>`
+      : `<?xml version="1.0" encoding="UTF-8"?>
+<clientConfig version="1.1"><emailProvider id="${domain}"><domain>${domain}</domain><displayName>TechInn email</displayName><incomingServer type="imap"><hostname>${host}</hostname><port>993</port><socketType>SSL</socketType><username>${address}</username><authentication>password-cleartext</authentication></incomingServer><outgoingServer type="smtp"><hostname>${host}</hostname><port>465</port><socketType>SSL</socketType><username>${address}</username><authentication>password-cleartext</authentication></outgoingServer></emailProvider></clientConfig>`
+    const extension = platform === "apple" ? "mobileconfig" : platform === "outlook" ? "xml" : "xml"
+    const type = platform === "apple" ? "application/x-apple-aspen-config" : "application/xml"
+    const url = URL.createObjectURL(new Blob([body], { type: `${type};charset=utf-8` }))
+    const link = document.createElement("a")
+    link.href = url
+    link.download = `techinn-email-${domain}.${extension}`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+  return <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-3" role="dialog" aria-modal="true" aria-labelledby="email-device-title" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <div className="max-h-[90svh] w-full max-w-xl overflow-y-auto rounded-2xl border border-orange-200 bg-background p-5 shadow-2xl dark:border-orange-900">
+      <div className="flex items-start justify-between gap-4"><div><h3 className="text-lg font-semibold" id="email-device-title">Set up email on a device</h3><p className="mt-1 text-sm text-muted-foreground">Use these settings for {domain}. Your password is never shown here.</p></div><Button aria-label="Close device setup" onClick={onClose} size="icon" variant="ghost"><X className="size-4" /></Button></div>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="text-sm font-medium">Domain<select className="mt-1 h-10 w-full rounded-md border border-orange-300 bg-background px-3 text-sm" onChange={(event) => setDomain(event.target.value)} value={domain}>{domains.length ? domains.map((name) => <option key={name} value={name}>{name}</option>) : <option value="yourdomain.tld">yourdomain.tld</option>}</select></label><label className="text-sm font-medium">Mailbox address<span className="mt-1 flex h-10 items-center rounded-md border border-orange-300 bg-background px-3"><Input className="h-8 border-0 p-0 shadow-none focus-visible:ring-0" onChange={(event) => setMailbox(event.target.value)} placeholder={`name@${domain}`} type="email" value={mailbox} /></span></label></div>
+      <div className="mt-4 space-y-2">{Object.entries(settings).map(([label, value]) => <div className="flex items-center gap-2 rounded-lg border bg-muted/20 p-2.5" key={label}><div className="min-w-0 flex-1"><p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p><p className="truncate text-sm" title={value}>{value}</p></div><Button onClick={() => void copy(label, value)} size="sm" variant="outline">{copied === label ? "Copied" : "Copy"}</Button></div>)}</div>
+      <div className="mt-4 rounded-lg border border-orange-200 p-3 dark:border-orange-900"><label className="text-sm font-medium">Automatic configuration file<select className="mt-1 h-10 w-full rounded-md border border-orange-300 bg-background px-3 text-sm" onChange={(event) => setPlatform(event.target.value as typeof platform)} value={platform}><option value="android">Android / Thunderbird (XML)</option><option value="apple">iPhone, iPad or Mac (Apple profile)</option><option value="outlook">Outlook (XML)</option></select></label><p className="mt-2 text-xs text-muted-foreground">The file is generated for the selected domain and mailbox. Your device will ask you to confirm installation; passwords are entered by you and are never placed in the file.</p><Button className="mt-3 w-full" onClick={downloadConfiguration} size="sm" variant="outline">Download automatic setup file</Button></div>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2"><div className="rounded-lg border p-3"><p className="font-medium">Android</p><p className="mt-1 text-xs text-muted-foreground">Open Gmail or Outlook, choose Add another account, select Other, then enter your mailbox password if the app does not import the XML automatically.</p></div><div className="rounded-lg border p-3"><p className="font-medium">iPhone or iPad</p><p className="mt-1 text-xs text-muted-foreground">Open the downloaded profile, approve it in Settings, then enter your mailbox password when prompted.</p></div></div>
+      <p className="mt-4 text-xs text-muted-foreground">Use SSL/TLS certificate verification. If the domain is still processing, mail may not work until its DNS becomes active.</p>
+    </div>
+  </div>
 }
 
 function SectionHeading({

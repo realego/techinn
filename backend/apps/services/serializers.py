@@ -1,3 +1,4 @@
+from django.db import transaction
 import json
 import re
 
@@ -17,6 +18,8 @@ from apps.services.models import (
     ProvisioningAction,
     ServiceAuditEvent,
     ServiceMember,
+    SupportTicket,
+    SupportTicketMessage,
 )
 from apps.accounts.models import Customer
 from apps.services.domain_availability import normalize_domain_name
@@ -366,6 +369,60 @@ class ServiceAuditEventSerializer(serializers.ModelSerializer):
     class Meta:
         model = ServiceAuditEvent
         fields = ("id", "event_type", "entity_type", "entity_id", "payload", "created_at")
+
+
+class SupportTicketMessageSerializer(serializers.ModelSerializer):
+    author_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SupportTicketMessage
+        fields = ("id", "body", "author_name", "is_staff", "created_at")
+
+    def get_author_name(self, obj):
+        if not obj.author:
+            return "TechInn support"
+        return getattr(obj.author, "get_full_name", lambda: "")() or getattr(obj.author, "email", "Support")
+
+
+class SupportTicketSerializer(serializers.ModelSerializer):
+    ticket_number = serializers.ReadOnlyField()
+    service_uuid = serializers.UUIDField(source="customer_service.uuid", read_only=True, allow_null=True)
+    service_label = serializers.SerializerMethodField()
+    messages = SupportTicketMessageSerializer(many=True, read_only=True)
+    message = serializers.CharField(write_only=True, required=False, allow_blank=False, max_length=10000)
+    service = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+
+    class Meta:
+        model = SupportTicket
+        fields = (
+            "id", "ticket_number", "subject", "category", "status", "priority", "service_uuid",
+            "service_label", "service", "message", "messages", "created_at", "updated_at",
+        )
+        read_only_fields = ("id", "ticket_number", "status", "service_uuid", "service_label", "messages", "created_at", "updated_at")
+
+    def get_service_label(self, obj):
+        if not obj.customer_service:
+            return None
+        return str(obj.customer_service.product)
+
+    def validate_service(self, value):
+        if value in (None, ""):
+            return None
+        request = self.context.get("request")
+        service = accessible_services_for(request.user).filter(uuid=value).first() if request else None
+        if not service:
+            raise serializers.ValidationError("Choose a service from this account.")
+        return service
+
+    @transaction.atomic
+    def create(self, validated_data):
+        message = validated_data.pop("message", "")
+        service = validated_data.pop("service", None)
+        ticket = SupportTicket.objects.create(customer=self.context["request"].user, customer_service=service, **validated_data)
+        first_message = SupportTicketMessage.objects.create(ticket=ticket, author=ticket.customer, body=message) if message else None
+        from apps.notifications.tickets import queue_ticket_notification
+        queue_ticket_notification(ticket, first_message)
+        return ticket
 
 
 class ServiceMemberSerializer(serializers.ModelSerializer):

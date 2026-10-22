@@ -524,6 +524,51 @@ class ServiceAuditEvent(models.Model):
         ordering = ("-created_at",)
 
 
+class SupportTicket(models.Model):
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        PENDING_SUPPORT = "pending_support", "Pending support"
+        PENDING_CUSTOMER = "pending_customer", "Pending customer"
+        RESOLVED = "resolved", "Resolved"
+        CLOSED = "closed", "Closed"
+
+    class Priority(models.TextChoices):
+        LOW = "low", "Low"
+        NORMAL = "normal", "Normal"
+        HIGH = "high", "High"
+        URGENT = "urgent", "Urgent"
+
+    customer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="support_tickets")
+    customer_service = models.ForeignKey(
+        CustomerService, on_delete=models.SET_NULL, null=True, blank=True, related_name="support_tickets"
+    )
+    subject = models.CharField(max_length=180)
+    category = models.CharField(max_length=24, default="other")
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN, db_index=True)
+    priority = models.CharField(max_length=10, choices=Priority.choices, default=Priority.NORMAL)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-updated_at",)
+        indexes = [models.Index(fields=("customer", "status"), name="idx_ticket_customer_status")]
+
+    @property
+    def ticket_number(self):
+        return f"TI-{self.pk:06d}"
+
+
+class SupportTicketMessage(models.Model):
+    ticket = models.ForeignKey(SupportTicket, on_delete=models.CASCADE, related_name="messages")
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    body = models.TextField()
+    is_staff = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("created_at",)
+
+
 class DomainConnection(models.Model):
     """A customer-scoped claim; only verified claims can reserve a DomainAsset."""
     class Mode(models.TextChoices):

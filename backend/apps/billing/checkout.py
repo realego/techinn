@@ -297,8 +297,13 @@ def create_checkout_order(customer, lines, details, displayed_total):
                 )
             except Addon.DoesNotExist as exc:
                 raise ValidationError({"items": ["One or more selected options are unavailable."]}) from exc
+            # Domain registrations are annual even though the storefront does
+            # not expose a monthly/yearly toggle. The old branch selected the
+            # legacy monthly domain-extension row (for example $12 for
+            # .co.zw) while the storefront correctly displayed the annual $2
+            # registration price.
             addon_interval = (
-                "annually" if yearly else "monthly"
+                "annually" if product_slug == "domains" or yearly else "monthly"
             ) if addon.billing_type == Addon.BillingType.RECURRING else "one_time"
             addon_price = _active_price(
                 AddonPrice.objects.filter(addon=addon),

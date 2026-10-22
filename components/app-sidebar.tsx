@@ -8,6 +8,7 @@ import {
   IconHistory,
   IconListDetails,
   IconMail,
+  IconMessageCircle,
   IconSettings,
   IconUsers,
   IconWorld,
@@ -43,6 +44,7 @@ const navMain = [
   { title: "Account & security", url: "/dashboard/account/", icon: IconSettings },
   { title: "Team access", url: "/dashboard/team/", icon: IconUsers },
   { title: "Connections", url: "/dashboard/connections/", icon: IconListDetails },
+  { title: "Tickets", url: "/dashboard/tickets/", icon: IconMessageCircle },
 ]
 
 const navSecondary = [

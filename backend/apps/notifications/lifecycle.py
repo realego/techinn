@@ -5,6 +5,8 @@ queue row per event, while delivery can be enabled once templates are written.
 """
 from django.db import IntegrityError, transaction
 from apps.accounts.models import Customer
+from datetime import timedelta
+
 from django.utils import timezone
 
 from apps.notifications.models import EmailQueue, EmailTemplate
@@ -74,6 +76,48 @@ def ensure_lifecycle_templates():
             changed.append("status")
         if changed:
             template.save(update_fields=(*changed, "updated_at"))
+
+
+DOMAIN_PROCESSING_GRACE = timedelta(hours=1)
+
+
+def queue_domain_processing_update(*, domain, now=None):
+    """Queue a domain-processing email only after a real state transition.
+
+    Domain activation is polled more often than customers need email.  The
+    initial state is recorded without sending anything, and transitions seen
+    during the first hour are also recorded silently.  This prevents a worker
+    restart or a long-running registry check from turning one pending domain
+    into a recurring inbox notification.
+    """
+    now = now or timezone.now()
+    service = domain.customer_service
+    data = dict(service.provisioning_data or {})
+    registration = dict(data.get("domain_registration", {}))
+    state = f"{domain.status}:{registration.get('status') or 'pending'}"
+    notification_state = dict(data.get("notification_state", {}))
+    previous_state = notification_state.get("domain_processing")
+    state_changed = previous_state is not None and previous_state != state
+
+    if previous_state != state:
+        notification_state["domain_processing"] = state
+        notification_state["domain_processing_observed_at"] = now.isoformat()
+        data["notification_state"] = notification_state
+        service.provisioning_data = data
+        service.save(update_fields=("provisioning_data", "updated_at"))
+
+    # The first hour is intentionally quiet.  A later state change can send
+    # one update, but an unchanged pending state never catches up with a
+    # delayed "still processing" email.
+    if not state_changed or now - domain.created_at < DOMAIN_PROCESSING_GRACE:
+        return None
+
+    return queue_lifecycle_event(
+        customer=service.customer,
+        slug="domain-processing",
+        key=f"domain:processing:{domain.pk}:{state}",
+        context={"domain": domain.domain_name, "status": domain.status, "state": state},
+    )
 
 
 @transaction.atomic

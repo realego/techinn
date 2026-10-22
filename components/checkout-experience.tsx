@@ -3,7 +3,7 @@
 import { ArrowLeft, CheckCircle2, CircleX, LoaderCircle, Minus, Plus, Trash2 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type FocusEvent, type FormEvent, type InvalidEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import { CartLineOptions } from "@/components/cart-line-options";
 import { Badge } from "@/components/ui/badge";
@@ -25,6 +25,16 @@ const pollWindowMs = 90_000;
 const checkoutKeyStorage = "techinn-checkout-key";
 const checkoutCartStorage = "techinn-checkout-cart";
 const testCheckoutTotal = 0.01;
+const checkoutDetailKeys = [
+  "business_name", "business_type", "preferred_domain", "registrant_name", "registrant_business_name",
+  "physical_address", "physical_city", "physical_country", "postal_same_as_physical", "postal_address",
+  "postal_city", "postal_country", "nameserver_type", "nameserver_1", "nameserver_2", "nameserver_3",
+  "nameserver_4", "nameserver_ip_1", "nameserver_ip_2", "nameserver_ip_3", "nameserver_ip_4",
+] as const;
+const attributionKeys = [
+  "source", "medium", "referrer", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+  "gclid", "fbclid", "landing_path",
+] as const;
 
 // Zimbabwe urban locations that must stay in the City/Town field, not the street address.
 const ZIMBABWE_LOCATIONS = [
@@ -38,25 +48,20 @@ const ZIMBABWE_LOCATIONS = [
   "Sanyati", "Tsholotsho", "Uzumba-Maramba-Pfungwe", "Zaka", "Zvimba",
 ];
 
-function cleanAddressLocation(event: React.FocusEvent<HTMLInputElement>) {
-  const input = event.currentTarget;
-  const form = input.form;
-  const prefix = input.name.startsWith("postal_") ? "postal_" : "physical_";
-  const city = form?.elements.namedItem(`${prefix}city`);
-  const country = form?.elements.namedItem(`${prefix}country`);
+function normalizeAddressLocation(value: string, cityValue = "", countryValue = "") {
   const locations = [
-    city instanceof HTMLInputElement ? city.value : "",
-    country instanceof HTMLInputElement ? country.value : "",
+    cityValue,
+    countryValue,
     ...ZIMBABWE_LOCATIONS,
     "Zimbabwe",
   ].map((value) => value.trim()).filter(Boolean).sort((a, b) => b.length - a.length);
-  let cleaned = input.value.trim().replace(/\s+/g, " ");
+  let cleaned = value.trim().replace(/\s+/g, " ");
   for (const location of locations) {
     const escaped = location.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     cleaned = cleaned.replace(new RegExp(`(?:,?\\s+)${escaped}\\s*$`, "i"), "").trim();
   }
   cleaned = cleaned.replace(/[,.]\\s*$/, "").trim();
-  if (cleaned !== input.value) input.value = cleaned;
+  return cleaned;
 }
 
 export function CheckoutExperience() {
@@ -88,10 +93,13 @@ export function CheckoutExperience() {
     () => typeof window !== "undefined" && Boolean(window.sessionStorage.getItem(checkoutKeyStorage)),
   );
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [pollWindowStartedAt, setPollWindowStartedAt] = useState(
     () => returnedPaymentUuid ? Date.now() : 0,
   );
+  const checkoutFormRef = useRef<HTMLFormElement>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const invalidFocusScheduled = useRef(false);
   const pollInFlight = useRef(false);
   const checkoutKey = useRef<string | null>(
     typeof window === "undefined" ? null : window.sessionStorage.getItem(checkoutKeyStorage),
@@ -103,6 +111,130 @@ export function CheckoutExperience() {
     line.productId !== "web-storage-addon"
     && ["Web Hosting", "Email Hosting", "Website Design"].includes(line.product.category)
   ));
+
+  function getFormInput(form: HTMLFormElement, name: string) {
+    const element = form.elements.namedItem(name);
+    return element instanceof HTMLInputElement ? element : null;
+  }
+
+  function focusFieldInCenter(name: string) {
+    const input = checkoutFormRef.current ? getFormInput(checkoutFormRef.current, name) : null;
+    if (!input) return;
+    input.focus({ preventScroll: true });
+    input.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+  }
+
+  function setFieldError(name: string, message: string) {
+    const input = checkoutFormRef.current ? getFormInput(checkoutFormRef.current, name) : null;
+    input?.setCustomValidity(message);
+    setFieldErrors((current) => ({ ...current, [name]: message }));
+  }
+
+  function clearFieldError(name: string) {
+    const input = checkoutFormRef.current ? getFormInput(checkoutFormRef.current, name) : null;
+    input?.setCustomValidity("");
+    setFieldErrors((current) => {
+      if (!(name in current)) return current;
+      const next = { ...current };
+      delete next[name];
+      return next;
+    });
+  }
+
+  function validateAddressPair(form: HTMLFormElement) {
+    const physical = getFormInput(form, "physical_address");
+    const postal = getFormInput(form, "postal_address");
+    if (!physical || !postal) return true;
+    const physicalCity = getFormInput(form, "physical_city")?.value ?? "";
+    const physicalCountry = getFormInput(form, "physical_country")?.value ?? "";
+    const postalCity = getFormInput(form, "postal_city")?.value ?? "";
+    const postalCountry = getFormInput(form, "postal_country")?.value ?? "";
+    physical.value = normalizeAddressLocation(physical.value, physicalCity, physicalCountry);
+    postal.value = normalizeAddressLocation(postal.value, postalCity, postalCountry);
+    const sameAddress = [physical.value, physicalCity, physicalCountry].map((value) => value.trim().toLowerCase()).join("|")
+      === [postal.value, postalCity, postalCountry].map((value) => value.trim().toLowerCase()).join("|");
+    if (sameAddress && physical.value && postal.value) {
+      const message = "Address 2 must be different from Address 1.";
+      setFieldError("postal_address", message);
+      setFieldError("physical_address", message);
+      return false;
+    }
+    clearFieldError("physical_address");
+    clearFieldError("postal_address");
+    return true;
+  }
+
+  function handleAddressBlur(event: FocusEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const form = input.form;
+    if (!form) return;
+    const city = getFormInput(form, `${input.name.startsWith("postal_") ? "postal" : "physical"}_city`)?.value ?? "";
+    const country = getFormInput(form, `${input.name.startsWith("postal_") ? "postal" : "physical"}_country`)?.value ?? "";
+    input.value = normalizeAddressLocation(input.value, city, country);
+    validateAddressPair(form);
+    if (!input.value.trim()) {
+      setFieldError(input.name, input.name === "physical_address" ? "Enter Address 1." : "Enter Address 2.");
+    }
+  }
+
+  function handleAddressInput(event: FormEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    if (fieldErrors[input.name]) clearFieldError(input.name);
+    if (input.form) validateAddressPair(input.form);
+  }
+
+  function handleFormInput(event: FormEvent<HTMLFormElement>) {
+    const input = event.target instanceof HTMLInputElement ? event.target : null;
+    if (!input) return;
+    input.removeAttribute("aria-invalid");
+    if (fieldErrors[input.name]) clearFieldError(input.name);
+    if (input.form && ["physical_city", "physical_country", "postal_city", "postal_country"].includes(input.name)) {
+      validateAddressPair(input.form);
+    }
+  }
+
+  function handleRequiredBlur(event: FocusEvent<HTMLFormElement>) {
+    const input = event.target instanceof HTMLInputElement ? event.target : null;
+    if (!input?.required || input.name === "physical_address" || input.name === "postal_address") return;
+    if (!input.value.trim()) {
+      input.setAttribute("aria-invalid", "true");
+      setFieldError(input.name, "Complete this field before continuing.");
+    } else if (fieldErrors[input.name]) {
+      clearFieldError(input.name);
+    }
+  }
+
+  function handleInvalid(event: InvalidEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const input = event.target instanceof HTMLInputElement ? event.target : null;
+    if (!input) return;
+    const message = fieldErrors[input.name] || input.validationMessage || "Complete this field before continuing.";
+    input.setAttribute("aria-invalid", "true");
+    setFieldError(input.name, message);
+    if (invalidFocusScheduled.current) return;
+    invalidFocusScheduled.current = true;
+    focusFieldInCenter(input.name);
+    window.setTimeout(() => { invalidFocusScheduled.current = false; }, 0);
+  }
+
+  function handleCheckoutApiError(message: string) {
+    const normalized = message.toLowerCase();
+    if (normalized.includes("address 2") || normalized.includes("separate postal")) {
+      setFieldError("postal_address", message);
+      setFieldError("physical_address", message);
+      setDialogOpen(false);
+      focusFieldInCenter("postal_address");
+      return;
+    }
+    if (normalized.includes("registrant") || normalized.includes("physical address")) {
+      setFieldError("registrant_name", message);
+      setDialogOpen(false);
+      focusFieldInCenter("registrant_name");
+      return;
+    }
+    setCheckoutError(message);
+    setDialogOpen(false);
+  }
 
   const applyPaymentUpdate = useCallback((updated: CheckoutPayment) => {
     setPayment(updated);
@@ -197,23 +329,16 @@ export function CheckoutExperience() {
     setSubmitting(true);
     setCheckoutError("");
     setNetworkIssue(false);
-    setDialogOpen(true);
     const formData = new FormData(event.currentTarget);
     const details = Object.fromEntries(
-      [
-        "business_name", "business_type", "preferred_domain", "registrant_name",
-        "registrant_business_name", "physical_address", "physical_city", "physical_country",
-        "postal_same_as_physical", "postal_address", "postal_city", "postal_country",
-        "nameserver_type", "nameserver_1", "nameserver_2", "nameserver_3", "nameserver_4",
-        "nameserver_ip_1", "nameserver_ip_2", "nameserver_ip_3", "nameserver_ip_4",
-      ]
-        .map((key) => [key, String(formData.get(key) ?? "")])
+      checkoutDetailKeys
+        .map((key) => [key, String(formData.get(key) ?? "").trim().slice(0, 255)])
         .filter(([, value]) => Boolean(value)),
     );
     details.postal_same_as_physical = "false";
     const visitAttribution = Object.fromEntries(
-      ["source", "medium", "referrer", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid", "landing_path"]
-        .map((key) => [key, String(attribution?.[key as keyof typeof attribution] ?? "")])
+      attributionKeys
+        .map((key) => [key, String(attribution?.[key] ?? "").trim().slice(0, 255)])
         .filter(([, value]) => Boolean(value)),
     );
     if (!checkoutKey.current) {
@@ -240,6 +365,7 @@ export function CheckoutExperience() {
         attribution: visitAttribution,
       });
       applyPaymentUpdate(result);
+      setDialogOpen(true);
       setPollWindowStartedAt(Date.now());
       setPollStopped(false);
       if (paymentMethod === "card" && result.redirect_url && result.status === "processing") {
@@ -251,12 +377,11 @@ export function CheckoutExperience() {
         window.sessionStorage.removeItem(checkoutKeyStorage);
         window.sessionStorage.removeItem(checkoutCartStorage);
         setCheckoutStarted(false);
+        handleCheckoutApiError(cause.message);
+      } else {
+        setCheckoutError(cause instanceof Error ? cause.message : "We couldn’t start checkout. Please try again.");
+        setDialogOpen(true);
       }
-      setCheckoutError(
-        cause instanceof Error
-          ? cause.message
-          : "We couldn’t start checkout. Please try again.",
-      );
     } finally {
       setSubmitting(false);
     }
@@ -348,7 +473,8 @@ export function CheckoutExperience() {
             </CardContent>
           </Card>
         ) : (
-          <form onSubmit={handleSubmit} className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_390px] lg:items-start">
+          <div className="space-y-4">
+            <form ref={checkoutFormRef} onBlurCapture={handleRequiredBlur} onInput={handleFormInput} onInvalid={handleInvalid} onSubmit={handleSubmit} className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_390px] lg:items-start">
             <div className="grid gap-6">
               <Card>
                 <CardHeader>
@@ -368,8 +494,8 @@ export function CheckoutExperience() {
                     <CardDescription>These details will be attached to your order so we can prepare your hosting or website service.</CardDescription>
                   </CardHeader>
                   <CardContent className="grid gap-4 sm:grid-cols-2">
-                    <label className="grid gap-2 text-sm font-medium">Business or project name<Input autoComplete="organization" name="business_name" placeholder="Your business name" required /></label>
-                    <label className="grid gap-2 text-sm font-medium">What does your business do?<Input name="business_type" placeholder="For example, catering or accounting" required /></label>
+                    <label className="grid gap-2 text-sm font-medium">Business or project name <span className="text-muted-foreground font-normal">(optional)</span><Input autoComplete="organization" name="business_name" placeholder="Your business name" /></label>
+                    <label className="grid gap-2 text-sm font-medium">What does your business do? <span className="text-muted-foreground font-normal">(optional)</span><Input name="business_type" placeholder="For example, catering or accounting" /></label>
                     <p className="text-sm text-muted-foreground sm:col-span-2">You will enter the exact domain to use for each hosting or email service in your dashboard after payment. This lets you use different domains for different services.</p>
                   </CardContent>
                 </Card>
@@ -383,21 +509,21 @@ export function CheckoutExperience() {
                   </CardHeader>
                   <CardContent className="space-y-4">
                     <div className="grid gap-4 sm:grid-cols-2">
-                      <label className="grid gap-2 text-sm font-medium">Registrant or owner name<Input autoComplete="name" defaultValue={customerName} name="registrant_name" required /></label>
-                      <label className="grid gap-2 text-sm font-medium">Business or organization<Input autoComplete="organization" defaultValue={customer?.company_name ?? ""} name="registrant_business_name" required /></label>
+                      <label className="grid gap-2 text-sm font-medium">Registrant or owner name<Input aria-describedby="registrant-name-error" aria-invalid={Boolean(fieldErrors.registrant_name)} autoComplete="name" defaultValue={customerName} name="registrant_name" required />{fieldErrors.registrant_name && <span id="registrant-name-error" role="alert" className="text-xs font-normal text-orange-700 dark:text-orange-300">{fieldErrors.registrant_name}</span>}</label>
+                      <label className="grid gap-2 text-sm font-medium">Business or organization <span className="text-muted-foreground font-normal">(optional)</span><Input autoComplete="organization" defaultValue={customer?.company_name ?? ""} name="registrant_business_name" /></label>
                       <div className="grid gap-1 text-sm sm:col-span-2">
                         <span className="font-medium">Registrant email</span>
                         <span className="text-muted-foreground min-h-10 rounded-md border px-3 py-2">{customer?.email}</span>
                       </div>
-                      <label className="grid gap-2 text-sm font-medium">Physical address<Input autoComplete="street-address" name="physical_address" onBlur={cleanAddressLocation} placeholder="27B Acturus Road, Eastlea" required /><span className="text-xs font-normal text-muted-foreground">Street number, street name/type, and suburb only. Do not add city or country.</span></label>
-                      <label className="grid gap-2 text-sm font-medium">City or town<Input autoComplete="address-level2" name="physical_city" placeholder="Harare" required /></label>
-                      <label className="grid gap-2 text-sm font-medium">Country<Input autoComplete="country-name" defaultValue="Zimbabwe" name="physical_country" placeholder="Zimbabwe" required /></label>
+                      <label className="grid gap-2 text-sm font-medium">Address 1 (physical)<Input aria-describedby="physical-address-help physical-address-error" aria-invalid={Boolean(fieldErrors.physical_address)} autoComplete="street-address" name="physical_address" onBlur={handleAddressBlur} onChange={handleAddressInput} placeholder="27B Acturus Road, Eastlea" required /><span id="physical-address-help" className="text-xs font-normal text-muted-foreground">Street number, street name/type, and suburb only. Do not add city or country.</span>{fieldErrors.physical_address && <span id="physical-address-error" role="alert" className="text-xs font-normal text-orange-700 dark:text-orange-300">{fieldErrors.physical_address}</span>}</label>
+                      <label className="grid gap-2 text-sm font-medium">City or town<Input aria-describedby="physical-city-error" aria-invalid={Boolean(fieldErrors.physical_city)} autoComplete="address-level2" name="physical_city" placeholder="Harare" required />{fieldErrors.physical_city && <span id="physical-city-error" role="alert" className="text-xs font-normal text-orange-700 dark:text-orange-300">{fieldErrors.physical_city}</span>}</label>
+                      <label className="grid gap-2 text-sm font-medium">Country<Input aria-describedby="physical-country-error" aria-invalid={Boolean(fieldErrors.physical_country)} autoComplete="country-name" defaultValue="Zimbabwe" name="physical_country" placeholder="Zimbabwe" required />{fieldErrors.physical_country && <span id="physical-country-error" role="alert" className="text-xs font-normal text-orange-700 dark:text-orange-300">{fieldErrors.physical_country}</span>}</label>
                     </div>
                     <div className="rounded-md border border-orange-300 bg-orange-50/60 p-3 text-xs text-orange-950 dark:border-orange-900 dark:bg-orange-950/20 dark:text-orange-100">Address 2 must be a separate postal address. Address 1 is also used as the physical domicilium address for the registration.</div>
                     <div className="grid gap-4 sm:grid-cols-2">
-                      <label className="grid gap-2 text-sm font-medium">Postal address (Address 2)<Input autoComplete="street-address" name="postal_address" onBlur={cleanAddressLocation} placeholder="P.O. Box 1234" required /><span className="text-xs font-normal text-muted-foreground">Enter the separate postal address, P.O. Box, or postal bag.</span></label>
-                      <label className="grid gap-2 text-sm font-medium">Postal city or town<Input autoComplete="address-level2" name="postal_city" placeholder="Harare" required /></label>
-                      <label className="grid gap-2 text-sm font-medium">Postal country<Input autoComplete="country-name" name="postal_country" placeholder="Zimbabwe" required /></label>
+                      <label className="grid gap-2 text-sm font-medium">Address 2 (postal)<Input aria-describedby="postal-address-help postal-address-error" aria-invalid={Boolean(fieldErrors.postal_address)} autoComplete="street-address" name="postal_address" onBlur={handleAddressBlur} onChange={handleAddressInput} placeholder="12 Samora Machel Avenue, Eastlea" required /><span id="postal-address-help" className="text-xs font-normal text-muted-foreground">Enter a separate postal address from Address 1. A P.O. Box or postal bag is also accepted.</span>{fieldErrors.postal_address && <span id="postal-address-error" role="alert" className="text-xs font-normal text-orange-700 dark:text-orange-300">{fieldErrors.postal_address}</span>}</label>
+                      <label className="grid gap-2 text-sm font-medium">Postal city or town<Input aria-describedby="postal-city-error" aria-invalid={Boolean(fieldErrors.postal_city)} autoComplete="address-level2" name="postal_city" placeholder="Harare" required />{fieldErrors.postal_city && <span id="postal-city-error" role="alert" className="text-xs font-normal text-orange-700 dark:text-orange-300">{fieldErrors.postal_city}</span>}</label>
+                      <label className="grid gap-2 text-sm font-medium">Postal country<Input aria-describedby="postal-country-error" aria-invalid={Boolean(fieldErrors.postal_country)} autoComplete="country-name" name="postal_country" placeholder="Zimbabwe" required />{fieldErrors.postal_country && <span id="postal-country-error" role="alert" className="text-xs font-normal text-orange-700 dark:text-orange-300">{fieldErrors.postal_country}</span>}</label>
                     </div>
                     <label className="flex cursor-pointer items-start gap-3 rounded-md border p-3 text-sm">
                       <input
@@ -526,6 +652,7 @@ export function CheckoutExperience() {
                     View payment status
                   </Button>
                 )}
+                {checkoutError && <p role="alert" className="mt-4 rounded-md border border-orange-500/50 bg-orange-500/10 px-4 py-3 text-sm text-orange-800 dark:text-orange-200">{checkoutError}</p>}
                 <Button type="submit" className="mt-5 w-full" size="lg" loading={submitting} disabled={submitting || paymentInProgress}>
                   {submitting ? "Starting secure checkout" : paymentInProgress ? "Payment in progress" : `Pay $${checkoutTotal.toFixed(2)} with ${paymentMethods.find((method) => method.id === paymentMethod)?.label}`}
                 </Button>
@@ -535,7 +662,8 @@ export function CheckoutExperience() {
                 </p>
               </CardContent>
             </Card>
-          </form>
+            </form>
+          </div>
         )}
       </div>
 

@@ -83,13 +83,13 @@ function ShopSidebar({ category, onCategoryChange, cartCount }: {
             <SidebarGroupContent><nav aria-label="Shop categories">{categoryMenu(expanded)}</nav></SidebarGroupContent>
           </SidebarGroup>
         </SidebarContent>
-        <SidebarFooter className="border-t p-2 sm:p-3">
-          <SidebarMenu><SidebarMenuItem>
-            <SidebarMenuButton asChild tooltip={{ children: cartCount ? `Checkout, ${cartCount} ${cartCount === 1 ? "item" : "items"}` : "Checkout", hidden: expanded || isMobile }} className={cn("h-10", !expanded && "w-10 justify-center p-0")}>
-              <Link href="/checkout/" aria-label={cartCount ? `Checkout, ${cartCount} ${cartCount === 1 ? "item" : "items"}` : "Checkout"}>
+        <SidebarFooter className="overflow-visible border-t p-2 sm:p-3">
+          <SidebarMenu className="overflow-visible"><SidebarMenuItem className="overflow-visible">
+            <SidebarMenuButton asChild tooltip={{ children: cartCount ? `Checkout, ${cartCount} ${cartCount === 1 ? "item" : "items"}` : "Checkout", hidden: expanded || isMobile }} className={cn("h-10 overflow-visible", !expanded && "w-10 justify-center p-0")}>
+              <Link className="relative overflow-visible" href="/checkout/" aria-label={cartCount ? `Checkout, ${cartCount} ${cartCount === 1 ? "item" : "items"}` : "Checkout"}>
                 <span className="relative inline-flex">
                   <ShoppingCart />
-                  {cartCount > 0 && <span aria-hidden="true" className="bg-primary text-primary-foreground absolute -top-2 -right-2 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[9px] font-semibold tabular-nums">{cartCount > 99 ? "99+" : cartCount}</span>}
+                  {cartCount > 0 && <span aria-hidden="true" className="bg-primary text-primary-foreground ring-background absolute -top-2 left-2 z-10 flex h-5 min-w-5 shrink-0 items-center justify-center whitespace-nowrap rounded-full px-1.5 text-[10px] font-semibold leading-none tabular-nums ring-2">{cartCount > 99 ? "99+" : cartCount}</span>}
                 </span>
                 {expanded && <><span className="flex-1">Checkout</span>{cartCount > 0 && <span className="text-muted-foreground text-xs tabular-nums">{cartCount}</span>}</>}
               </Link>

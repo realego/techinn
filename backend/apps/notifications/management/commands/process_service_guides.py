@@ -9,6 +9,7 @@ from apps.notifications.models import EmailQueue, EmailLog
 from apps.notifications.lifecycle import queue_lifecycle_event
 from apps.notifications.lifecycle import ensure_lifecycle_templates
 from apps.notifications.emailing import render_queued_email, send_transactional
+from apps.notifications.sweep import sweep_email_queue
 from apps.orders.models import Order
 from apps.services.models import DomainAsset
 
@@ -66,6 +67,8 @@ class Command(BaseCommand):
                 f'SMTP: mail.{domain.domain_name}, port 465, SSL (or 587 with STARTTLS)\n'
                 'Use your full mailbox address as the username. DNS and certificates may take a little time to propagate.\n\n'
                 'Manage your services: https://my.techinn.co.zw/dashboard/'})
+        # Final duplicate-send safety gate after this run has queued its events.
+        swept = sweep_email_queue()
         sent = 0
         # Interrupted SMTP delivery is ambiguous: hold for review, never blindly resend.
         EmailQueue.objects.filter(
@@ -129,6 +132,7 @@ class Command(BaseCommand):
                     html=html,
                     security=security,
                     recipient_list=[row.recipient_email],
+                    reply_to=row.payload.get("reply_to") if row.email_template.slug in {"support-ticket-admin", "contact-admin"} else None,
                     fail_silently=False,
                 )
                 if count != 1:
@@ -144,4 +148,4 @@ class Command(BaseCommand):
             row.save(update_fields=('status', 'sent_at', 'last_error', 'scheduled_at'))
             if row.status == 'sent':
                 EmailLog.objects.create(email_queue=row, provider='smtp', status='sent')
-        self.stdout.write(f'Service guide/activation messages sent: {sent}')
+        self.stdout.write(f'Service guide/activation messages sent: {sent}; duplicate/stale rows suppressed: {swept}')

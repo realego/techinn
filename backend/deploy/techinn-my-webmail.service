@@ -1,0 +1,11 @@
+[Unit]
+Description=Prepare and verify TechInn domain webmail HTTPS
+After=network-online.target nginx.service
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/my.techinn.co.zw/launch-ui/backend
+EnvironmentFile=/home/my.techinn.co.zw/launch-ui/backend/.env
+ExecStart=/home/my.techinn.co.zw/launch-ui/backend/.venv/bin/python manage.py prepare_email_webmail
+TimeoutStartSec=900
+UMask=0077

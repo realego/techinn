@@ -111,69 +111,112 @@ class Command(BaseCommand):
                 continue
 
             if item.product.service_type.slug == "email-hosting":
+                # A mail plan may be bought for a different domain from an
+                # existing web plan.  It still needs its own panel website
+                # record because CyberPanel stores mailboxes under a website
+                # owner.  Reuse an existing account only when that exact root
+                # domain already has one; never fall back to the customer's
+                # first domain (which used to duplicate email cards).
+                if domain.status != DomainAsset.Status.ACTIVE:
+                    waiting += 1
+                    continue
                 panel_account = HostingAccount.objects.filter(
                     primary_domain=domain,
                     customer_service__customer=order.customer,
                     status=HostingAccount.Status.ACTIVE,
                 ).first()
-                if not panel_account:
-                    waiting += 1
-                    continue
                 existing_service = CustomerService.objects.filter(
-                    customer=order.customer,
-                    product=item.product,
+                    pk=pending_service.pk,
                     hosting_account__primary_domain=domain,
+                    hosting_account__status=HostingAccount.Status.ACTIVE,
                 ).select_related("hosting_account").order_by("-created_at").first()
                 if existing_service:
-                    was_inactive = (
-                        existing_service.status != CustomerService.Status.ACTIVE
-                        or existing_service.hosting_account.status != HostingAccount.Status.ACTIVE
-                    )
                     extend_service_period(existing_service, item)
-                    if was_inactive:
-                        reactivate_email_mailboxes(existing_service)
                     existing_service.status = CustomerService.Status.ACTIVE
-                    existing_service.hosting_account.status = HostingAccount.Status.ACTIVE
-                    existing_service.hosting_account.save(update_fields=("status", "updated_at"))
                     existing_service.save(update_fields=("status", "updated_at"))
                     completed += 1
+                    continue
+
+                package_setting = {
+                    "email-essential": ("CYBERPANEL_PACKAGE_WEB_BASIC", 2),
+                    "email-team": ("CYBERPANEL_PACKAGE_WEB_GROWTH", 5),
+                    "email-business-mail": ("CYBERPANEL_PACKAGE_WEB_BUSINESS", 15),
+                }.get(item.product.slug)
+                if panel_account is None and not package_setting:
+                    waiting += 1
+                    continue
+                if panel_account is None and not getattr(settings, package_setting[0], ""):
+                    waiting += 1
                     continue
                 started_at = timezone.now()
                 service = pending_service or CustomerService.objects.create(
                     customer=order.customer, product=item.product, order_item=item,
-                    status=CustomerService.Status.ACTIVE, started_at=started_at,
-                    provisioning_data={"cyberpanel": {"status": "active", "domain": domain.domain_name, "mail_only": True}},
+                    status=CustomerService.Status.PROVISIONING, started_at=started_at,
+                    provisioning_data={"cyberpanel": {"status": "provisioning", "domain": domain.domain_name, "mail_only": True}},
                 )
-                service.status = CustomerService.Status.ACTIVE
+                service.status = CustomerService.Status.PROVISIONING
                 service.started_at = service.started_at or started_at
-                service.provisioning_data = {**(service.provisioning_data or {}), "cyberpanel": {"status": "active", "domain": domain.domain_name, "mail_only": True}}
+                service.provisioning_data = {**(service.provisioning_data or {}), "cyberpanel": {"status": "provisioning", "domain": domain.domain_name, "mail_only": True}}
                 service.save(update_fields=("status", "started_at", "provisioning_data", "updated_at"))
                 extend_service_period(service, item, now=started_at)
-                account = HostingAccount.objects.create(
+                account, _ = HostingAccount.objects.get_or_create(
                     customer_service=service,
-                    server_name="CyberPanel",
-                    external_account_id=domain.domain_name,
-                    username=panel_account.username,
-                    primary_domain=domain,
-                    status=HostingAccount.Status.ACTIVE,
+                    defaults={"server_name": "CyberPanel", "external_account_id": domain.domain_name,
+                              "primary_domain": domain, "status": HostingAccount.Status.PENDING},
                 )
+                account.primary_domain = domain
+                account.server_name = account.server_name or "CyberPanel"
+                account.external_account_id = account.external_account_id or domain.domain_name
+                if panel_account:
+                    # The same CyberPanel owner can serve the domain when a
+                    # web plan already created it, while the email service
+                    # keeps its own dashboard service and quota.
+                    account.username = panel_account.username
+                    account.linux_username = panel_account.linux_username
+                    account.status = HostingAccount.Status.ACTIVE
+                    account.save(update_fields=("primary_domain", "server_name", "external_account_id", "username", "linux_username", "status", "updated_at"))
+                else:
+                    try:
+                        result = client.create_website(
+                            domain=domain.domain_name,
+                            email=order.customer.email,
+                            # CyberPanel rejects shell metacharacters in this
+                            # API field. Keep the generated password strong,
+                            # but remove the one unsafe character included by
+                            # the shared password helper.
+                            owner_password=generate_owner_password().replace("$", "x"),
+                            package=getattr(settings, package_setting[0]),
+                        )
+                        account.username = result.get("websiteOwner", "")
+                        account.linux_username = result.get("linux_username", "")
+                        account.status = HostingAccount.Status.ACTIVE
+                        account.save(update_fields=("primary_domain", "server_name", "external_account_id", "username", "linux_username", "status", "updated_at"))
+                        install_coming_soon_page(domain.domain_name, account.linux_username)
+                        set_shared_hosting_disk_quota(account)
+                    except CyberPanelError as error:
+                        service.status = CustomerService.Status.FAILED
+                        service.provisioning_data = {**(service.provisioning_data or {}), "cyberpanel": {"status": "failed", "domain": domain.domain_name, "mail_only": True, "message": str(error)}}
+                        service.save(update_fields=("status", "provisioning_data", "updated_at"))
+                        account.status = HostingAccount.Status.ERROR
+                        account.save(update_fields=("status", "updated_at"))
+                        failed += 1
+                        continue
                 mailbox_count = Mailbox.objects.filter(domain=domain).update(hosting_account=account)
-                HostingResource.objects.create(
+                HostingResource.objects.update_or_create(
                     hosting_account=account,
                     resource_type=HostingResource.ResourceType.EMAIL_ACCOUNTS,
-                    limit_value=EMAIL_PLAN_LIMITS.get(item.product.slug, Decimal("21")),
-                    used_value=Decimal(mailbox_count),
-                    unit="mailboxes",
-                    measured_at=timezone.now(),
+                    defaults={"limit_value": EMAIL_PLAN_LIMITS.get(item.product.slug, Decimal("21")), "used_value": Decimal(mailbox_count), "unit": "mailboxes", "measured_at": timezone.now()},
                 )
-                HostingResource.objects.create(
+                HostingResource.objects.update_or_create(
                     hosting_account=account,
                     resource_type=HostingResource.ResourceType.DISK,
-                    limit_value=EMAIL_PLAN_STORAGE_GB.get(item.product.slug, Decimal("2")),
-                    used_value=Decimal("0"),
-                    unit="GB",
-                    measured_at=timezone.now(),
+                    defaults={"limit_value": EMAIL_PLAN_STORAGE_GB.get(item.product.slug, Decimal("2")), "used_value": Decimal("0"), "unit": "GB", "measured_at": timezone.now()},
                 )
+                service.status = CustomerService.Status.ACTIVE
+                service.provisioning_data = {**(service.provisioning_data or {}), "cyberpanel": {"status": "active", "domain": domain.domain_name, "mail_only": True}}
+                service.save(update_fields=("status", "provisioning_data", "updated_at"))
+                from apps.services.management.commands.prepare_email_webmail import prepare_webmail
+                prepare_webmail(service)
                 completed += 1
                 continue
 
@@ -226,7 +269,7 @@ class Command(BaseCommand):
                 defaults={"primary_domain": domain, "external_account_id": domain.domain_name,
                           "status": HostingAccount.Status.PENDING},
             )
-            password = generate_owner_password()
+            password = generate_owner_password().replace("$", "x")
             try:
                 result = client.create_website(
                     domain=domain.domain_name,

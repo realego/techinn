@@ -96,9 +96,9 @@ def _secure_services(domain_asset):
                 client.issue_ssl(domain=domain_asset.domain_name)
                 security["website_certificate_at"] = timezone.now().isoformat()
                 security["certificate_status"] = "active"
-            if kind == "email-hosting" and not security.get("mail_certificate_at"):
-                client.issue_mail_ssl(hostname=f"mail.{domain_asset.domain_name}")
-                security["mail_certificate_at"] = timezone.now().isoformat()
+            # Mail TLS is installed and verified by the privileged webmail
+            # worker. Issuing HTTPS here does not secure IMAP/SMTP, and this
+            # activation worker cannot write their server configuration.
             data["security"] = security
             service.provisioning_data = data
             service.save(update_fields=("provisioning_data", "updated_at"))

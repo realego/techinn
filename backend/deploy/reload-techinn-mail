@@ -1,0 +1,8 @@
+#!/bin/sh
+# Postfix embeds PEM contents in its SNI map; rebuild after any renewal.
+set -eu
+/usr/local/sbin/techinn-dovecot-config-guard
+/usr/sbin/postmap -F /etc/postfix/vmail_ssl.map
+/usr/sbin/doveconf -n >/dev/null
+/usr/sbin/postfix check
+/bin/systemctl reload postfix dovecot nginx

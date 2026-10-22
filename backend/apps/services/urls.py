@@ -26,6 +26,9 @@ from apps.services.views import (
     ProviderConnectionViewSet,
     ServiceAuditEventListView,
     ServiceMemberDetailView,
+    ServiceControlView,
+    SupportTicketListCreateView,
+    SupportTicketDetailView,
     ServiceMemberListCreateView,
 )
 
@@ -43,6 +46,9 @@ urlpatterns = [
     path("hosting-accounts/<int:account_id>/file-manager/", HostingFileManagerView.as_view(), name="hosting-file-manager"),
     path("hosting-accounts/<int:account_id>/panel-login/", HostingPanelLoginView.as_view(), name="hosting-panel-login"),
     path("dashboard/", DashboardView.as_view(), name="service-dashboard"),
+    path("tickets/", SupportTicketListCreateView.as_view(), name="support-ticket-list"),
+    path("tickets/<int:pk>/", SupportTicketDetailView.as_view(), name="support-ticket-detail"),
+    path("<uuid:service_uuid>/control/", ServiceControlView.as_view(), name="service-control"),
     path("domains/check-activation/", DomainActivationCheckView.as_view(), name="domain-activation-check"),
     path("domains/", DomainListView.as_view(), name="customer-domains"),
     path("domains/search/", DomainAvailabilityView.as_view(), name="domain-availability"),

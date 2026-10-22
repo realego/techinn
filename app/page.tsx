@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Image from "next/image";
 
 import { DomainSearchForm } from "../components/domain-search-form";
 import { HomeDomainHeading } from "../components/home-domain-heading";
@@ -88,6 +89,30 @@ export default function Home() {
       <Items />
       <Stats />
       <FAQ />
+      <section className="group/reviews relative isolate overflow-hidden px-4 py-16 sm:py-24" aria-labelledby="google-review-title">
+        <div className="relative z-10 mx-auto flex max-w-container flex-col items-center gap-5 rounded-2xl border border-orange-500/20 bg-orange-500/5 px-5 py-10 text-center sm:px-10">
+          <h2 id="google-review-title" className="text-3xl font-semibold tracking-tight sm:text-4xl">Enjoying TechInn?</h2>
+          <p className="text-muted-foreground max-w-xl text-sm leading-6 sm:text-base">Share your experience on Google. Your feedback helps other Zimbabwean businesses find the right digital services.</p>
+          <a
+            href="https://g.page/r/CewwIePtW5X9EBM/review"
+            target="_blank"
+            rel="noreferrer"
+            aria-label="Review TechInn on Google"
+            className="group/review-link rounded-xl border border-orange-400/60 bg-background/80 p-2 shadow-sm transition-[border-color,box-shadow,transform] duration-200 hover:border-orange-500 hover:shadow-md focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-orange-500"
+          >
+            <Image
+              src="/reviews/google-review-button.png"
+              alt="Google Reviews — leave a review for TechInn"
+              width={334}
+              height={187}
+              className="h-auto w-56 transition-transform duration-200 group-hover/review-link:scale-105 sm:w-64"
+              unoptimized
+            />
+            <span className="sr-only">Review TechInn on Google</span>
+          </a>
+        </div>
+        <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 -z-10 opacity-70 transition-opacity duration-500 group-hover/reviews:opacity-100"><Glow variant="bottom" /></div>
+      </section>
       <Footer />
     </main>
   );

@@ -78,6 +78,39 @@ class CyberPanelClient:
         if not package.strip():
             raise CyberPanelError("A CyberPanel package mapping is required for this hosting plan.")
         username = "ti" + re.sub(r"[^a-z0-9]", "", email.lower().split("@", 1)[0])[:24]
+        # CyberPanel reuses an existing owner for the same email address. Its
+        # default owner limit is often one website, which made a second paid
+        # domain fail with a reseller-limit error even though the selected
+        # package permits more domains. Increase only that customer's owner
+        # allowance to the number of websites they are about to own.
+        capacity_script = """
+import os, sys
+sys.path.insert(0, '/usr/local/CyberCP')
+os.environ['DJANGO_SETTINGS_MODULE'] = 'CyberCP.settings'
+import django; django.setup()
+from loginSystem.models import Administrator
+email = sys.stdin.read().strip().lower()
+owner = Administrator.objects.filter(email__iexact=email, state='ACTIVE').exclude(userName='admin').first()
+if owner:
+    needed = owner.websites_set.count() + 1 + sum(Administrator.objects.filter(owner=owner.pk).values_list('initWebsitesLimit', flat=True))
+    if not owner.initWebsitesLimit or owner.initWebsitesLimit < needed:
+        owner.initWebsitesLimit = needed
+        owner.save(update_fields=['initWebsitesLimit'])
+"""
+        try:
+            subprocess.run(
+                ["/usr/local/CyberCP/bin/python", "-c", capacity_script],
+                input=email,
+                text=True,
+                capture_output=True,
+                timeout=20,
+                check=True,
+                cwd="/usr/local/CyberCP",
+            )
+        except (subprocess.SubprocessError, OSError):
+            # The API remains the source of truth on installations without
+            # the local CyberPanel Python environment.
+            pass
         result = self._post("createWebsite", {
             "domainName": domain,
             "ownerEmail": email,
@@ -97,13 +130,22 @@ class CyberPanelClient:
         # The panel username is NOT the Linux filesystem owner.
         # Verify the resulting website and its owner before granting access.
         script = """
-import os, sys, json
+import os, sys, json, time
 sys.path.insert(0, '/usr/local/CyberCP')
 os.environ['DJANGO_SETTINGS_MODULE'] = 'CyberCP.settings'
 import django; django.setup()
 from websiteFunctions.models import Websites
 d = json.load(sys.stdin)
-s = Websites.objects.select_related('admin').get(domain=d['domain'])
+last = None
+for _ in range(15):
+    try:
+        s = Websites.objects.select_related('admin').get(domain=d['domain'])
+        break
+    except Websites.DoesNotExist as error:
+        last = error
+        time.sleep(2)
+else:
+    raise last or RuntimeError('Website was not created')
 if s.admin.email.lower() != d['email'].lower():
     raise ValueError('Website belongs to another customer')
 print(json.dumps({'websiteOwner': s.admin.userName, 'linux_username': s.externalApp}))

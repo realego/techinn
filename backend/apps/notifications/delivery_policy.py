@@ -13,8 +13,20 @@ def obsolete_reason(row):
         if not CustomerService.objects.filter(uuid=context.get("service_uuid"), status__in=("pending", "provisioning")).exists():
             return "Service no longer processing."
     elif slug == "domain-processing":
-        if not DomainAsset.objects.filter(domain_name=context.get("domain"), status__in=("pending", "transfer_pending")).exists():
+        domain = DomainAsset.objects.filter(
+            domain_name=context.get("domain"),
+            status__in=("pending", "transfer_pending"),
+        ).select_related("customer_service").first()
+        if not domain:
             return "Domain no longer processing."
+        registration = dict((domain.customer_service.provisioning_data or {}).get("domain_registration", {}))
+        current_state = f"{domain.status}:{registration.get('status') or 'pending'}"
+        # Legacy rows did not persist a state.  Do not deliver them: they are
+        # exactly the repeated "still processing" messages this policy stops.
+        if context.get("state") != current_state:
+            return "Domain processing state changed before delivery."
+        if timezone.now() - domain.created_at < timedelta(hours=1):
+            return "Domain processing notification is within the first-hour quiet period."
     elif slug == "cart-payment-reminder":
         if not Order.objects.filter(order_number=context.get("order_number"), status="awaiting_payment").exists():
             return "Order no longer awaiting payment."

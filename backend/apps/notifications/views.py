@@ -1,6 +1,7 @@
 from datetime import timedelta
 import hashlib
 from django.db import connection, transaction
+from django.conf import settings
 from django.utils import timezone
 from apps.notifications.models import EmailQueue, EmailTemplate
 from rest_framework import serializers, status
@@ -57,6 +58,24 @@ class ContactRequestView(APIView):
                         template, _ = EmailTemplate.objects.get_or_create(slug="contact-acknowledgement", defaults={"name": "Enquiry received", "subject": "We received your TechInn enquiry", "body_html": "", "body_text": ""})
                         if template.status == EmailTemplate.Status.ACTIVE:
                             EmailQueue.objects.create(email_template=template, recipient_email=email, subject=template.subject, payload={"lifecycle_key": f"contact-received:{enquiry.pk}", "context": {"reference": f"TI-ENQ-{enquiry.pk:06d}"}})
+                    admin_template, _ = EmailTemplate.objects.get_or_create(
+                        slug="contact-admin",
+                        defaults={"name": "Shop enquiry for support", "subject": "New TechInn shop enquiry", "body_html": "", "body_text": ""},
+                    )
+                    admin_key = f"contact-admin:{enquiry.pk}"
+                    if admin_template.status == EmailTemplate.Status.ACTIVE and not EmailQueue.objects.filter(
+                        email_template=admin_template, payload__lifecycle_key=admin_key
+                    ).exists():
+                        EmailQueue.objects.create(
+                            email_template=admin_template,
+                            recipient_email=getattr(settings, "SUPPORT_TICKET_EMAIL", "support@technologyinn.co.zw"),
+                            subject=f"New TechInn enquiry from {enquiry.name}"[:255],
+                            payload={"lifecycle_key": admin_key, "reply_to": enquiry.email, "context": {
+                                "reference": f"TI-ENQ-{enquiry.pk:06d}", "name": enquiry.name,
+                                "customer_email": enquiry.email, "phone": enquiry.phone,
+                                "message": enquiry.message, "source": enquiry.source,
+                            }},
+                        )
         finally:
             if locked:
                 with connection.cursor() as cursor:

@@ -4,7 +4,11 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from apps.billing.models import Payment
-from apps.notifications.lifecycle import ensure_lifecycle_templates, queue_lifecycle_event
+from apps.notifications.lifecycle import (
+    ensure_lifecycle_templates,
+    queue_domain_processing_update,
+    queue_lifecycle_event,
+)
 from apps.orders.models import Order
 from apps.services.models import CustomerService, DomainAsset
 
@@ -36,7 +40,7 @@ class Command(BaseCommand):
                 queued += 1
 
         for domain in DomainAsset.objects.filter(status__in=(DomainAsset.Status.PENDING, DomainAsset.Status.TRANSFER_PENDING)).select_related("customer_service__customer")[:options["limit"]]:
-            if queue_lifecycle_event(customer=domain.customer_service.customer, slug="domain-processing", key=f"domain:processing:{domain.pk}", context={"domain": domain.domain_name}):
+            if queue_domain_processing_update(domain=domain, now=now):
                 queued += 1
 
         for service in CustomerService.objects.filter(status=CustomerService.Status.ACTIVE, expires_at__isnull=False).select_related("customer", "product__service_type")[:options["limit"]]:
